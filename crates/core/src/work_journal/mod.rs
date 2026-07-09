@@ -1,6 +1,8 @@
 use crate::error::Result;
 use rusqlite::Connection;
 
+pub mod sessionize;
+
 pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS work_sessions (

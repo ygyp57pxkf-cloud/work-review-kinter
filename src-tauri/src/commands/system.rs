@@ -1347,14 +1347,12 @@ mod tests {
         // 回归：活动采集偶发写入脏数据（app_name 是浏览器，executable_path 却指向 IDE）。
         // 修复前 executable_path 无条件得 i32::MAX，浏览器会错误显示编译器图标。
         let cands = super::macos_icon_app_path_candidates(
-            "Microsoft Edge",
-            Some("/Applications/PyCharm.app"),
+            "Safari",
+            Some("/Applications/Google Chrome.app"),
         );
         let first = cands.first();
         assert!(
-            first
-                .map(|p| p.contains("Microsoft Edge.app"))
-                .unwrap_or(false),
+            first.map(|p| p.contains("Safari.app")).unwrap_or(false),
             "浏览器不应因脏 executable_path 显示编译器图标, 实际首位: {:?}",
             first
         );

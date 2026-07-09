@@ -6,4 +6,5 @@ pub mod database;
 pub mod error;
 pub mod policy;
 pub mod privacy;
+pub mod work_journal;
 pub mod work_intelligence;

@@ -654,6 +654,8 @@ impl Database {
             [],
         )?;
 
+        crate::work_journal::init_schema(&conn)?;
+
         // === FTS5 全文检索索引 ===
         // activities FTS: 索引窗口标题、OCR 文本、应用名、浏览器 URL
         conn.execute_batch(
@@ -3279,6 +3281,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::{safe_local_timestamp, Activity, Database};
+    use rusqlite::{params, Connection};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3294,6 +3297,188 @@ mod tests {
         let date = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").expect("解析日期失败");
         let ndt = date.and_hms_opt(hour, minute, 0).expect("构造本地时间失败");
         safe_local_timestamp(ndt)
+    }
+
+    fn table_exists(conn: &Connection, table_name: &str) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![table_name],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
+
+    fn index_exists(conn: &Connection, index_name: &str) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            params![index_name],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
+
+    fn table_columns(conn: &Connection, table_name: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table_name})"))
+            .expect("读取表结构失败");
+        stmt.query_map([], |row| row.get::<_, String>(1))
+            .expect("读取列信息失败")
+            .map(|row| row.expect("读取列名失败"))
+            .collect()
+    }
+
+    #[test]
+    fn work_journal_schema应在初始化时创建新表和索引() {
+        let db_path = temp_db_path("work-journal-schema");
+        let db = Database::new(&db_path).expect("创建测试数据库失败");
+        drop(db);
+
+        let conn = Connection::open(&db_path).expect("打开测试数据库失败");
+        assert!(table_exists(&conn, "work_sessions"));
+        assert!(table_exists(&conn, "project_attributions"));
+        assert!(table_exists(&conn, "obsidian_exports"));
+
+        let work_session_columns = table_columns(&conn, "work_sessions");
+        for expected in [
+            "id",
+            "date",
+            "started_at",
+            "ended_at",
+            "duration",
+            "primary_app",
+            "activity_ids",
+            "summary",
+            "created_at",
+        ] {
+            assert!(
+                work_session_columns.iter().any(|column| column == expected),
+                "work_sessions 缺少列 {expected}: {work_session_columns:?}"
+            );
+        }
+
+        let attribution_columns = table_columns(&conn, "project_attributions");
+        for expected in [
+            "id",
+            "session_id",
+            "project_key",
+            "project_name",
+            "confidence",
+            "evidence",
+            "needs_review",
+            "confirmed",
+            "created_at",
+        ] {
+            assert!(
+                attribution_columns.iter().any(|column| column == expected),
+                "project_attributions 缺少列 {expected}: {attribution_columns:?}"
+            );
+        }
+
+        let export_columns = table_columns(&conn, "obsidian_exports");
+        for expected in [
+            "id",
+            "date",
+            "target_path",
+            "content_hash",
+            "exported_at",
+            "status",
+        ] {
+            assert!(
+                export_columns.iter().any(|column| column == expected),
+                "obsidian_exports 缺少列 {expected}: {export_columns:?}"
+            );
+        }
+
+        assert!(index_exists(&conn, "idx_work_sessions_date"));
+        assert!(index_exists(&conn, "idx_project_attributions_session"));
+        assert!(index_exists(&conn, "idx_obsidian_exports_date"));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn work_journal迁移不应破坏已有活动日报和时段摘要() {
+        let db_path = temp_db_path("work-journal-compat");
+        {
+            let conn = Connection::open(&db_path).expect("创建旧版测试数据库失败");
+            conn.execute_batch(
+                "CREATE TABLE activities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp INTEGER NOT NULL,
+                    app_name TEXT NOT NULL,
+                    window_title TEXT NOT NULL,
+                    screenshot_path TEXT NOT NULL,
+                    ocr_text TEXT,
+                    category TEXT NOT NULL,
+                    duration INTEGER NOT NULL
+                );
+                CREATE TABLE daily_reports (
+                    date TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    ai_mode TEXT NOT NULL,
+                    model_name TEXT,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE TABLE hourly_summaries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    hour INTEGER NOT NULL,
+                    summary TEXT NOT NULL,
+                    main_apps TEXT NOT NULL,
+                    activity_count INTEGER NOT NULL,
+                    total_duration INTEGER NOT NULL,
+                    representative_screenshots TEXT,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(date, hour)
+                );",
+            )
+            .expect("初始化旧版表失败");
+            conn.execute(
+                "INSERT INTO activities (timestamp, app_name, window_title, screenshot_path, ocr_text, category, duration)
+                 VALUES (?1, 'Code', 'schema.rs', 'shot.jpg', 'old ocr', 'development', 600)",
+                params![local_ts("2026-07-09", 10, 0)],
+            )
+            .expect("插入旧版活动失败");
+            conn.execute(
+                "INSERT INTO daily_reports (date, content, ai_mode, model_name, created_at)
+                 VALUES ('2026-07-09', '旧日报', 'basic', NULL, ?1)",
+                params![local_ts("2026-07-09", 18, 0)],
+            )
+            .expect("插入旧版日报失败");
+            conn.execute(
+                "INSERT INTO hourly_summaries (date, hour, summary, main_apps, activity_count, total_duration, representative_screenshots, created_at)
+                 VALUES ('2026-07-09', 10, '旧时段摘要', 'Code', 1, 600, NULL, ?1)",
+                params![local_ts("2026-07-09", 10, 30)],
+            )
+            .expect("插入旧版时段摘要失败");
+        }
+
+        let db = Database::new(&db_path).expect("打开旧版数据库并迁移失败");
+        let activities = db
+            .get_activities_in_range(Some("2026-07-09"), Some("2026-07-09"), 10)
+            .expect("迁移后读取活动失败");
+        let report = db
+            .get_report("2026-07-09", Some("zh-CN"))
+            .expect("迁移后读取日报失败")
+            .expect("迁移后应能读取日报");
+        let hourly = db
+            .get_hourly_summaries("2026-07-09")
+            .expect("迁移后读取时段摘要失败");
+        drop(db);
+
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].app_name, "Code");
+        assert_eq!(activities[0].duration, 600);
+        assert_eq!(report.content, "旧日报");
+        assert_eq!(hourly.len(), 1);
+        assert_eq!(hourly[0].summary, "旧时段摘要");
+
+        let conn = Connection::open(&db_path).expect("重新打开迁移后数据库失败");
+        assert!(table_exists(&conn, "work_sessions"));
+        assert!(table_exists(&conn, "project_attributions"));
+        assert!(table_exists(&conn, "obsidian_exports"));
+
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[test]

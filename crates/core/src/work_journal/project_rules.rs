@@ -1,4 +1,8 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+use crate::config::PrivacyConfig;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectRule {
     pub project_key: String,
     pub project_name: String,
@@ -12,7 +16,7 @@ pub struct ProjectRule {
     pub priority: i32,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectEvidence {
     pub app_name: String,
     pub window_title: String,
@@ -23,7 +27,7 @@ pub struct ProjectEvidence {
     pub semantic_category: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectMatch {
     pub project_key: String,
     pub project_name: String,
@@ -77,12 +81,48 @@ pub fn default_project_rules() -> Vec<ProjectRule> {
             local_paths: strings(&["timereview", "work-review-kinter", "Work-Review"]),
             domains: Vec::new(),
             url_keywords: strings(&["timereview", "work-review-kinter", "Work-Review"]),
-            window_keywords: strings(&["timereview", "Work Review", "Work Journal", "work-review-kinter"]),
+            window_keywords: strings(&[
+                "timereview",
+                "Work Review",
+                "Work Journal",
+                "work-review-kinter",
+            ]),
             app_keywords: strings(&["Work Journal", "Work Review"]),
             negative_keywords: Vec::new(),
             priority: 60,
         },
     ]
+}
+
+pub fn normalize_project_rules(rules: &mut Vec<ProjectRule>) {
+    let mut seen = std::collections::HashSet::new();
+
+    rules.retain_mut(|rule| {
+        rule.project_key = rule.project_key.trim().to_string();
+        rule.project_name = rule.project_name.trim().to_string();
+        rule.obsidian_page = rule.obsidian_page.trim().to_string();
+        rule.priority = rule.priority.clamp(-1000, 1000);
+
+        normalize_string_list(&mut rule.local_paths);
+        normalize_string_list(&mut rule.domains);
+        normalize_string_list(&mut rule.url_keywords);
+        normalize_string_list(&mut rule.window_keywords);
+        normalize_string_list(&mut rule.app_keywords);
+        normalize_string_list(&mut rule.negative_keywords);
+
+        if rule.project_key.is_empty() || rule.project_name.is_empty() {
+            return false;
+        }
+
+        seen.insert(rule.project_key.to_lowercase())
+    });
+
+    rules.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left.project_key.cmp(&right.project_key))
+    });
 }
 
 pub fn match_project(evidence: &ProjectEvidence, rules: &[ProjectRule]) -> Option<ProjectMatch> {
@@ -126,13 +166,7 @@ fn score_rule(evidence: &ProjectEvidence, rule: &ProjectRule) -> Option<ProjectM
     }
 
     if let Some(executable_path) = evidence.executable_path.as_deref() {
-        score += score_keywords(
-            executable_path,
-            &rule.local_paths,
-            70,
-            "path",
-            &mut reasons,
-        );
+        score += score_keywords(executable_path, &rule.local_paths, 70, "path", &mut reasons);
     }
 
     score += score_keywords(
@@ -177,6 +211,14 @@ fn score_rule(evidence: &ProjectEvidence, rule: &ProjectRule) -> Option<ProjectM
 
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| item.to_string()).collect()
+}
+
+fn normalize_string_list(items: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    items.retain_mut(|item| {
+        *item = item.trim().to_string();
+        !item.is_empty() && seen.insert(item.to_lowercase())
+    });
 }
 
 fn is_entertainment(evidence: &ProjectEvidence) -> bool {
@@ -272,12 +314,10 @@ mod tests {
 
         assert_eq!(matched.project_key, "it-service-robot");
         assert_eq!(matched.project_name, "IT服务机器人");
-        assert!(
-            matched
-                .evidence
-                .iter()
-                .any(|evidence| evidence.contains("aip-dev.sikadavco.cn"))
-        );
+        assert!(matched
+            .evidence
+            .iter()
+            .any(|evidence| evidence.contains("aip-dev.sikadavco.cn")));
     }
 
     #[test]
@@ -307,4 +347,3 @@ mod tests {
         assert_eq!(matched, None);
     }
 }
-use crate::config::PrivacyConfig;

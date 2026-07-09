@@ -13,6 +13,7 @@
   import SettingsSystem from './components/SettingsSystem.svelte';
   import SettingsPrivacy from './components/SettingsPrivacy.svelte';
   import SettingsStorage from './components/SettingsStorage.svelte';
+  import SettingsObsidian from './components/SettingsObsidian.svelte';
   let config = null;
   let loading = true;
   let saving = false;
@@ -38,6 +39,7 @@
     { id: 'ai', labelKey: 'settings.tabs.ai', icon: 'ai' },
     { id: 'avatar', labelKey: 'settings.tabs.avatar', icon: 'avatar', beta: true },
     { id: 'privacy', labelKey: 'settings.tabs.privacy', icon: 'privacy' },
+    { id: 'workJournal', labelKey: 'settings.tabs.workJournal', icon: 'workJournal' },
     { id: 'storage', labelKey: 'settings.tabs.storage', icon: 'storage' },
     { id: 'node', labelKey: 'settings.tabs.node', icon: 'node', beta: true },
   ];
@@ -191,6 +193,7 @@
         config.storage.screenshot_width_mode = 'auto';
       }
       if (!config.app_category_rules) config.app_category_rules = [];
+      if (!Array.isArray(config.work_journal_project_rules)) config.work_journal_project_rules = [];
       if (!config.privacy) config.privacy = {};
       if (!config.privacy.app_rules) config.privacy.app_rules = [];
       if (!config.privacy.excluded_keywords) config.privacy.excluded_keywords = [];
@@ -379,6 +382,8 @@
                   <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
                 {:else if tab.icon === 'storage'}
                   <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>
+                {:else if tab.icon === 'workJournal'}
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4.5 5.5h15M4.5 12h15M4.5 18.5h10" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 3v4M16 3v4M8 10v4M16 10v4" /></svg>
                 {/if}
               </span>
               <span class="inline-flex items-center gap-1 whitespace-nowrap">
@@ -416,6 +421,8 @@
             on:change={() => dirty = true}
             on:refresh-apps={() => { loadRunningApps(); loadRecentApps(); }}
           />
+        {:else if activeTab === 'workJournal'}
+          <SettingsObsidian bind:config on:change={handleSettingsChange} />
         {:else if activeTab === 'storage'}
           <SettingsStorage
             bind:config

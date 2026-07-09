@@ -667,6 +667,9 @@ pub struct AppConfig {
     /// 网站语义分类覆盖规则
     #[serde(default)]
     pub website_semantic_rules: Vec<WebsiteSemanticRule>,
+    /// Work Journal 项目归因规则
+    #[serde(default = "default_work_journal_project_rules")]
+    pub work_journal_project_rules: Vec<crate::work_journal::project_rules::ProjectRule>,
     /// 用户自定义语义分类
     #[serde(default)]
     pub custom_semantic_categories: Vec<CustomSemanticCategory>,
@@ -931,6 +934,10 @@ fn default_ui_visual_style() -> String {
     "c".to_string()
 }
 
+fn default_work_journal_project_rules() -> Vec<crate::work_journal::project_rules::ProjectRule> {
+    crate::work_journal::project_rules::default_project_rules()
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -945,6 +952,7 @@ impl Default for AppConfig {
             app_category_rules: Vec::new(),
             custom_categories: Vec::new(),
             website_semantic_rules: Vec::new(),
+            work_journal_project_rules: default_work_journal_project_rules(),
             custom_semantic_categories: Vec::new(),
             deleted_default_categories: Vec::new(),
             deleted_default_semantic_categories: Vec::new(),
@@ -1059,6 +1067,9 @@ impl AppConfig {
         normalize_website_semantic_rules(
             &mut self.website_semantic_rules,
             &self.custom_semantic_categories,
+        );
+        crate::work_journal::project_rules::normalize_project_rules(
+            &mut self.work_journal_project_rules,
         );
         self.screenshot_interval = normalize_screenshot_interval(self.screenshot_interval);
         self.idle_threshold_minutes = normalize_idle_threshold_minutes(self.idle_threshold_minutes);
@@ -1683,6 +1694,23 @@ mod tests {
 
         assert!(config.daily_report_custom_prompt.is_empty());
         assert_eq!(config.daily_report_export_dir, None);
+    }
+
+    #[test]
+    fn work_journal项目规则默认应写入配置快照() {
+        let value = serde_json::to_value(AppConfig::default()).expect("序列化配置失败");
+        let rules = value
+            .get("work_journal_project_rules")
+            .and_then(|value| value.as_array())
+            .expect("配置中应包含 work_journal_project_rules 数组");
+
+        assert!(rules.iter().any(|rule| {
+            rule.get("project_key").and_then(|value| value.as_str()) == Some("it-service-robot")
+        }));
+        assert!(rules.iter().any(|rule| {
+            rule.get("obsidian_page").and_then(|value| value.as_str())
+                == Some("私人/个人项目文档/Work Journal/Work Journal")
+        }));
     }
 
     #[test]

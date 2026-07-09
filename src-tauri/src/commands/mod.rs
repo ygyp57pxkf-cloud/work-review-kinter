@@ -19,6 +19,7 @@ mod ai;
 mod updater;
 mod integration;
 mod system;
+mod work_journal;
 
 // 所有 pub command + DTO（main.rs generate_handler 的 commands::xxx 不变）
 pub use stats::*;
@@ -34,6 +35,7 @@ pub use ai::*;
 pub use updater::*;
 pub use integration::*;
 pub use system::*;
+pub use work_journal::*;
 
 // 被 main.rs / localhost_api / agent / bot 直接调用的 pub(crate) helper
 // 通过子模块再次 re-export，保持 `commands::xxx_inner` / `commands::xxx` 路径不断。

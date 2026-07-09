@@ -1,6 +1,7 @@
 use crate::error::Result;
 use rusqlite::Connection;
 
+pub mod project_rules;
 pub mod sessionize;
 
 pub fn init_schema(conn: &Connection) -> Result<()> {

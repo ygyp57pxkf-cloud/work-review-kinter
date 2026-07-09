@@ -791,14 +791,14 @@ fn should_emit_avatar_backlog_nudge(
 
 pub(crate) fn default_data_dir() -> PathBuf {
     dirs::data_dir()
-        .map(|d| d.join("work-review"))
+        .map(|d| d.join("work-journal"))
         .unwrap_or_else(|| PathBuf::from("./data"))
 }
 
 fn data_dir_preference_path() -> PathBuf {
     dirs::config_dir()
-        .map(|d| d.join("work-review").join("data-location.json"))
-        .unwrap_or_else(|| PathBuf::from("./work-review-data-location.json"))
+        .map(|d| d.join("work-journal").join("data-location.json"))
+        .unwrap_or_else(|| PathBuf::from("./work-journal-data-location.json"))
 }
 
 fn load_data_dir_preference() -> Option<PathBuf> {
@@ -3929,7 +3929,8 @@ mod tests {
         advance_break_reminder, avatar_activity_decision, avatar_monitor_poll_interval_ms,
         avatar_monitor_poll_interval_ms_for_platform, avatar_proactive_ai_should_run,
         avatar_transition_decision, browser_change_capture_min_interval_ms,
-        duplicate_instance_should_stay_silent, effective_dock_visibility,
+        data_dir_preference_path, default_data_dir, duplicate_instance_should_stay_silent,
+        effective_dock_visibility,
         launch_args_contain_autostart, main_window_close_behavior, monitoring_poll_interval_ms,
         monitoring_poll_interval_ms_for_platform, persist_previous_activity_backfill,
         previous_app_backfill_duration, record_avatar_window_switch, recording_loop_decision,
@@ -3960,6 +3961,31 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         std::env::temp_dir().join(format!("work-review-tauri-{name}-{unique}.db"))
+    }
+
+    #[test]
+    fn fork默认数据目录应与上游work_review隔离() {
+        let data_dir = default_data_dir();
+        assert!(data_dir.ends_with("work-journal"), "{data_dir:?}");
+        assert!(
+            !data_dir.ends_with("work-review"),
+            "fork 默认目录不应继续指向上游 Work Review 数据目录: {data_dir:?}"
+        );
+    }
+
+    #[test]
+    fn fork数据目录偏好文件应与上游work_review隔离() {
+        let preference_path = data_dir_preference_path();
+        assert!(
+            preference_path.ends_with(PathBuf::from("work-journal").join("data-location.json")),
+            "{preference_path:?}"
+        );
+        assert!(
+            !preference_path
+                .to_string_lossy()
+                .contains("/work-review/data-location.json"),
+            "fork 偏好文件不应继续写入上游 Work Review 配置目录: {preference_path:?}"
+        );
     }
 
     #[test]

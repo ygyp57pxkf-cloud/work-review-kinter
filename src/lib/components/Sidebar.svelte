@@ -106,10 +106,10 @@
       <div class="sidebar-brand-row flex items-center gap-3 min-w-0">
         <div class="flex items-center gap-3 min-w-0">
           <div class="w-10 h-10 rounded-xl overflow-hidden shadow-md dark:shadow-[0_4px_12px_rgba(0,0,0,0.4)] shrink-0 ring-1 ring-slate-200/50 dark:ring-[#30363d]/50">
-            <img src="/icons/256x256.png" alt="Work Review" class="w-full h-full object-cover" />
+            <img src="/icons/256x256.png" alt="Work Journal" class="w-full h-full object-cover" />
           </div>
           <div class="min-w-0">
-            <h1 class="sidebar-brand-title">Work Review</h1>
+            <h1 class="sidebar-brand-title">Work Journal</h1>
           </div>
         </div>
       </div>

@@ -122,7 +122,7 @@ impl AvatarBubblePayload {
 pub fn default_avatar_state() -> AvatarStatePayload {
     AvatarStatePayload {
         mode: "idle".to_string(),
-        app_name: "Work Review".to_string(),
+        app_name: "Work Journal".to_string(),
         context_label: "待命中".to_string(),
         hint: "准备陪你开始工作".to_string(),
         is_idle: true,
@@ -973,7 +973,7 @@ mod tests {
         let state = default_avatar_state();
 
         assert_eq!(state.mode, "idle");
-        assert_eq!(state.app_name, "Work Review");
+        assert_eq!(state.app_name, "Work Journal");
         assert!(!state.is_generating_report);
     }
 

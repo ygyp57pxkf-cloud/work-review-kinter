@@ -365,6 +365,18 @@ pub fn normalize_display_app_name(app_name: &str) -> String {
         .filter(|ch| ch.is_ascii_alphanumeric())
         .collect::<String>();
 
+    if (normalized.contains("work_journal")
+        || normalized.contains("work-journal")
+        || normalized.contains("work journal")
+        || compact.contains("workjournal"))
+        && (normalized.contains("setup")
+            || normalized.contains("installer")
+            || compact.contains("setup")
+            || compact.contains("installer"))
+    {
+        return "Work Journal Setup".to_string();
+    }
+
     if (normalized.contains("work_review")
         || normalized.contains("work-review")
         || normalized.contains("work review")
@@ -390,6 +402,9 @@ pub fn normalize_display_app_name(app_name: &str) -> String {
 
     match normalized.as_str() {
         // ── 本应用 ──
+        "work-journal" | "work_journal" | "workjournal" | "work journal" => {
+            "Work Journal".to_string()
+        }
         "work-review" | "work_review" | "workreview" | "work review" => "Work Review".to_string(),
         // ── 浏览器 ──
         "chrome" | "google chrome" => "Google Chrome".to_string(),
@@ -1920,6 +1935,11 @@ mod tests {
             normalize_display_app_name("Work_Review.v1.0.35_x64-setup"),
             "Work Review Setup"
         );
+        assert_eq!(normalize_display_app_name("Work_Journal"), "Work Journal");
+        assert_eq!(
+            normalize_display_app_name("Work_Journal.v1.0.54_x64-setup"),
+            "Work Journal Setup"
+        );
         assert_eq!(normalize_display_app_name("xfltd"), "XFLTD");
     }
 
@@ -2722,6 +2742,9 @@ fn normalize_electron_app_name(process_name: &str, window_title: &str) -> String
     let title_lower = window_title.to_lowercase();
 
     let process_aliases = [
+        ("work-journal", "Work Journal"),
+        ("work_journal", "Work Journal"),
+        ("workjournal", "Work Journal"),
         ("work-review", "Work Review"),
         ("work_review", "Work Review"),
         ("workreview", "Work Review"),
@@ -2778,6 +2801,7 @@ fn normalize_electron_app_name(process_name: &str, window_title: &str) -> String
         ("code - ", "VS Code"), // VS Code 窗口标题常见格式
         // AI 工具
         ("antigravity", "Antigravity"),
+        ("work journal", "Work Journal"),
         ("work review", "Work Review"),
         ("copilot", "GitHub Copilot"),
         ("claude", "Claude Desktop"),

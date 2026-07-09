@@ -34,10 +34,10 @@
       "icons/icon.ico"
     ],
     "resources": [],
-    "copyright": "© 2026 WorkReview",
+    "copyright": "© 2026 Kinter / Work Journal",
     "category": "Productivity",
-    "shortDescription": "工作回顾与AI日报助手",
-    "longDescription": "一个高性能、低占用的工作活动追踪与AI日报生成工具，帮你记录每天的辛勤付出。",
+    "shortDescription": "个人工作日志与AI复盘助手",
+    "longDescription": "一个本地优先的个人工作状态记录、复盘与日志导出工具。",
     "macOS": {
       "frameworks": [],
       "minimumSystemVersion": "10.13",
@@ -74,17 +74,17 @@
       }
     }
   },
-  "productName": "Work Review",
-  "mainBinaryName": "Work_Review",
+  "productName": "Work Journal",
+  "mainBinaryName": "Work_Journal",
   "version": "1.0.54",
-  "identifier": "com.workreview.app",
+  "identifier": "com.kinter.workjournal",
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE5RTJFOUZBREEwMTA5RjIKUldUeUNRSGErdW5pcVdnajJvT3B2Vm9wdXlwb0QvVTBoQUZTTGYvSHJ2emhma3BWdnE3Q3dJTnkK",
       "endpoints": [
-        "https://github.com/wm94i/Work-Review/releases/latest/download/updater.json",
-        "https://gh-proxy.cn/https://github.com/wm94i/Work-Review/releases/latest/download/updater-ghproxy.json",
-        "https://gh-proxy.com/https://github.com/wm94i/Work-Review/releases/latest/download/updater-ghp.json"
+        "https://github.com/ygyp57pxkf-cloud/work-review-kinter/releases/latest/download/updater.json",
+        "https://gh-proxy.cn/https://github.com/ygyp57pxkf-cloud/work-review-kinter/releases/latest/download/updater-ghproxy.json",
+        "https://gh-proxy.com/https://github.com/ygyp57pxkf-cloud/work-review-kinter/releases/latest/download/updater-ghp.json"
       ],
       "windows": {
         "installMode": "passive"

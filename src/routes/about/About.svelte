@@ -102,7 +102,7 @@
     <section class="page-card about-brand-card">
       <div class="about-brand-head">
         <div class="about-brand-mark">
-          <img src="/icons/256x256.png" alt="Work Review" class="h-16 w-16 rounded-[18px] object-cover" />
+          <img src="/icons/256x256.png" alt="Work Journal" class="h-16 w-16 rounded-[18px] object-cover" />
         </div>
         <div class="flex flex-col items-center gap-1">
           <div class="flex items-center gap-2">
@@ -137,7 +137,7 @@
       </div>
 
       <div class="about-brand-copy">
-        <h1 class="about-brand-title">Work Review</h1>
+        <h1 class="about-brand-title">Work Journal</h1>
         <p class="about-brand-description">{t('about.description')}</p>
       </div>
 

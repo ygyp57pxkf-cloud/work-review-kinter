@@ -17,6 +17,7 @@
     { path: '/', labelKey: 'sidebar.nav.overview', icon: 'home' },
     { path: '/timeline', labelKey: 'sidebar.nav.timeline', icon: 'timeline' },
     { path: '/report', labelKey: 'sidebar.nav.report', icon: 'report' },
+    { path: '/journal', labelKey: 'sidebar.nav.journal', icon: 'journal' },
     { path: '/ask', labelKey: 'sidebar.nav.ask', icon: 'ask' },
     { path: '/settings', labelKey: 'sidebar.nav.settings', icon: 'settings' },
     { path: '/about', labelKey: 'sidebar.nav.about', icon: 'info' },
@@ -170,6 +171,11 @@
                   {:else if item.icon === 'report'}
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                  {:else if item.icon === 'journal'}
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 4.5h14M5 9h14M5 13.5h8M5 18h6" />
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M16 14l2 2 3-4" />
                     </svg>
                   {:else if item.icon === 'ask'}
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">

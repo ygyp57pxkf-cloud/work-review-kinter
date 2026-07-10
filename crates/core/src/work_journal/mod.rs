@@ -2,6 +2,7 @@ use crate::error::Result;
 use rusqlite::Connection;
 
 pub mod project_rules;
+pub mod obsidian;
 pub mod sessionize;
 
 pub fn init_schema(conn: &Connection) -> Result<()> {
@@ -51,4 +52,36 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::work_journal::obsidian::{
+        render_obsidian_daily_preview, ObsidianExportDay, ObsidianExportSession,
+    };
+
+    #[test]
+    fn obsidian预览应包含项目链接待确认标记和隐私说明() {
+        let markdown = render_obsidian_daily_preview(&ObsidianExportDay {
+            date: "2026-07-09".to_string(),
+            total_duration: 3_600,
+            project_count: 1,
+            sessions: vec![ObsidianExportSession {
+                started_at: "09:00".to_string(),
+                ended_at: "10:00".to_string(),
+                duration: 3_600,
+                project_name: "Work Journal".to_string(),
+                obsidian_page: "私人/个人项目文档/Work Journal/Work Journal".to_string(),
+                task_summary: "推进 Journal 审阅页".to_string(),
+                evidence: vec!["window:timereview".to_string()],
+                needs_review: true,
+            }],
+        });
+
+        assert!(markdown.contains("# 2026-07-09 工作日志"));
+        assert!(markdown.contains("[[私人/个人项目文档/Work Journal/Work Journal|Work Journal]]"));
+        assert!(markdown.contains("待确认"));
+        assert!(markdown.contains("隐私过滤说明"));
+        assert!(markdown.contains("window:timereview"));
+    }
 }

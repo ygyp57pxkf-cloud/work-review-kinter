@@ -11,4 +11,6 @@ test('work journal commands should be exposed through Tauri invoke handler', () 
   assert.match(main, /commands::get_work_journal_project_rules/);
   assert.match(main, /commands::save_work_journal_project_rules/);
   assert.match(main, /commands::match_work_journal_project/);
+  assert.match(main, /commands::get_work_journal_day/);
+  assert.match(main, /commands::preview_work_journal_obsidian_export/);
 });

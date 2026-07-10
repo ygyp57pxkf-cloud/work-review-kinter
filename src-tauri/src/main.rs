@@ -3808,6 +3808,8 @@ async fn main() {
             commands::get_work_journal_project_rules,
             commands::save_work_journal_project_rules,
             commands::match_work_journal_project,
+            commands::get_work_journal_day,
+            commands::preview_work_journal_obsidian_export,
             commands::get_update_settings,
             commands::save_update_settings,
             commands::should_check_updates,

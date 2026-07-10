@@ -132,12 +132,14 @@ pub fn match_project(evidence: &ProjectEvidence, rules: &[ProjectRule]) -> Optio
 
     rules
         .iter()
-        .filter_map(|rule| score_rule(evidence, rule))
-        .max_by(|left, right| {
+        .filter_map(|rule| score_rule(evidence, rule).map(|matched| (matched, rule.priority)))
+        .max_by(|(left, left_priority), (right, right_priority)| {
             left.score
                 .cmp(&right.score)
+                .then_with(|| left_priority.cmp(right_priority))
                 .then_with(|| left.project_key.cmp(&right.project_key))
         })
+        .map(|(matched, _)| matched)
 }
 
 fn score_rule(evidence: &ProjectEvidence, rule: &ProjectRule) -> Option<ProjectMatch> {
@@ -204,7 +206,7 @@ fn score_rule(evidence: &ProjectEvidence, rule: &ProjectRule) -> Option<ProjectM
         project_key: rule.project_key.clone(),
         project_name: rule.project_name.clone(),
         obsidian_page: rule.obsidian_page.clone(),
-        score: score + rule.priority,
+        score,
         evidence: reasons,
     })
 }
@@ -345,5 +347,21 @@ mod tests {
         let matched = match_project(&item, &default_project_rules());
 
         assert_eq!(matched, None);
+    }
+
+    #[test]
+    fn generic_wecom_app_signal_should_remain_low_confidence() {
+        let mut item = evidence();
+        item.app_name = "WeCom".to_string();
+        item.window_title = "企业微信".to_string();
+
+        let matched = match_project(&item, &default_project_rules()).expect("应保留低置信候选");
+
+        assert_eq!(matched.project_key, "it-service-robot");
+        assert!(
+            matched.score < 80,
+            "通用应用名不能因项目优先级被抬成高置信: {}",
+            matched.score
+        );
     }
 }

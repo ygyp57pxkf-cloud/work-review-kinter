@@ -149,6 +149,7 @@
     '/timeline/summary/:date': wrap({ asyncComponent: () => import('./routes/timeline/Summary.svelte') }),
     '/timeline/summary': wrap({ asyncComponent: () => import('./routes/timeline/Summary.svelte') }),
     '/report': wrap({ asyncComponent: () => import('./routes/report/Report.svelte') }),
+    '/journal': wrap({ asyncComponent: () => import('./routes/journal/Journal.svelte') }),
     '/ask': wrap({ asyncComponent: () => import('./routes/ask/Ask.svelte') }),
     '/settings': wrap({ asyncComponent: () => import('./routes/settings/Settings.svelte') }),
     '/about': wrap({ asyncComponent: () => import('./routes/about/About.svelte') }),

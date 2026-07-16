@@ -38,3 +38,31 @@ test('Release workflow 应构建并上传 Linux RPM 产物', () => {
   assert.match(source, /require_file "\*\/release\/bundle\/rpm\/\*\.rpm" "Linux x64 RPM"/);
   assert.match(source, /target\/\*\*\/release\/bundle\/rpm\/\*\.rpm/);
 });
+
+test('Release workflow 应产出 Work Journal 的双架构 macOS 与 Windows 安装和便携包', () => {
+  const source = readFileSync(new URL('./.github/workflows/release.yml', import.meta.url), 'utf8');
+
+  assert.match(source, /target:\s*aarch64-apple-darwin/);
+  assert.match(source, /target:\s*x86_64-apple-darwin/);
+  assert.match(source, /target:\s*x86_64-pc-windows-msvc/);
+  assert.match(source, /release\/bundle\/nsis\/\*\.exe/);
+  assert.match(source, /-name "Work_Journal\.exe"/);
+  assert.match(source, /Work_Journal_portable_x64\.zip/);
+  assert.match(source, /tar -tf "\$PORTABLE_ZIP"/);
+  assert.match(source, /for required_entry in Work_Journal\.exe PORTABLE_README\.txt/);
+  assert.match(source, /UNEXPECTED_ENTRIES=/);
+  assert.match(source, /target\/\*\*\/Work_Journal_portable_\*\.zip/);
+  assert.match(source, /Applications\/Work Journal\.app/);
+  assert.doesNotMatch(source, /Work_Review\.exe/);
+  assert.doesNotMatch(source, /Work_Review_portable/);
+});
+
+test('Release workflow 应支持不发布 Release 的内部无签名构建', () => {
+  const source = readFileSync(new URL('./.github/workflows/release.yml', import.meta.url), 'utf8');
+
+  assert.match(source, /workflow_dispatch:/);
+  assert.match(source, /github\.event_name.*workflow_dispatch/);
+  assert.match(source, /--config src-tauri\/tauri\.local\.conf\.json/);
+  assert.match(source, /if: github\.event_name == 'push' && startsWith\(github\.ref, 'refs\/tags\/v'\)/);
+  assert.match(source, /require_file "\*\/Work_Journal_portable_x64\.zip" "Windows 便携版"/);
+});

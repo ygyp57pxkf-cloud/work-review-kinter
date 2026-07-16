@@ -1,6 +1,7 @@
 <script>
   import { createEventDispatcher, onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { ask, open as openDialog } from '@tauri-apps/plugin-dialog';
   import { locale, t } from '$lib/i18n/index.js';
   import { showToast } from '$lib/stores/toast.js';
 
@@ -12,6 +13,10 @@
   let saving = false;
   let rules = [];
   let loadError = '';
+  let importSourceDir = '';
+  let importPreview = null;
+  let importPreviewing = false;
+  let importing = false;
   $: currentLocale = $locale;
 
   function normalizeRule(rule = {}) {
@@ -34,6 +39,113 @@
       config.work_journal_project_rules = [];
     }
     config.work_journal_project_rules = config.work_journal_project_rules.map(normalizeRule);
+  }
+
+  function normalizeObsidianSettings() {
+    if (!config.work_journal_obsidian || typeof config.work_journal_obsidian !== 'object') {
+      config.work_journal_obsidian = {};
+    }
+    config.work_journal_obsidian = {
+      vault_path: config.work_journal_obsidian.vault_path || '',
+      daily_folder: config.work_journal_obsidian.daily_folder || 'Work Journal',
+      export_mode: config.work_journal_obsidian.export_mode || 'preview_only',
+      conflict_behavior: config.work_journal_obsidian.conflict_behavior || 'append_under_marker',
+    };
+  }
+
+  function normalizeAiSettings() {
+    if (!config.work_journal_ai || typeof config.work_journal_ai !== 'object') {
+      config.work_journal_ai = {};
+    }
+    config.work_journal_ai = {
+      enabled: Boolean(config.work_journal_ai.enabled),
+      vision_enabled: Boolean(config.work_journal_ai.vision_enabled),
+      confidence_threshold: Number(config.work_journal_ai.confidence_threshold) || 80,
+      max_sessions_per_run: Number(config.work_journal_ai.max_sessions_per_run) || 5,
+    };
+  }
+
+  function updateObsidianSetting(field, value) {
+    config.work_journal_obsidian = {
+      ...config.work_journal_obsidian,
+      [field]: value,
+    };
+    dispatch('change', config);
+  }
+
+  function updateAiSetting(field, value) {
+    const next = {
+      ...config.work_journal_ai,
+      [field]: value,
+    };
+    if (field === 'enabled' && !value) next.vision_enabled = false;
+    config.work_journal_ai = next;
+    dispatch('change', config);
+  }
+
+  async function chooseVault() {
+    const selected = await openDialog({ directory: true, multiple: false });
+    if (selected && !Array.isArray(selected)) {
+      updateObsidianSetting('vault_path', selected);
+    }
+  }
+
+  async function chooseImportSource() {
+    const selected = await openDialog({ directory: true, multiple: false });
+    if (selected && !Array.isArray(selected)) {
+      importSourceDir = selected;
+      importPreview = null;
+    }
+  }
+
+  async function previewLegacyImport() {
+    importPreviewing = true;
+    importPreview = null;
+    try {
+      importPreview = await invoke('preview_work_review_import', {
+        sourceDir: importSourceDir.trim() || null,
+      });
+      importSourceDir = importPreview.source_dir;
+    } catch (error) {
+      showToast(t('settingsWorkJournal.importPreviewFailed', { error }), 'error');
+    } finally {
+      importPreviewing = false;
+    }
+  }
+
+  async function importLegacyData() {
+    if (!importPreview?.confirmation_token || importing) return;
+    const confirmed = await ask(t('settingsWorkJournal.importConfirmMessage', {
+      count: importPreview.activity_count,
+    }), {
+      title: t('settingsWorkJournal.importConfirmTitle'),
+      kind: 'warning',
+    });
+    if (!confirmed) return;
+
+    importing = true;
+    try {
+      const result = await invoke('import_work_review_data', {
+        input: { confirmation_token: importPreview.confirmation_token },
+      });
+      showToast(t('settingsWorkJournal.importSuccess', {
+        imported: result.imported_count,
+        duplicates: result.skipped_duplicate_count,
+      }), 'success');
+      importPreview = null;
+    } catch (error) {
+      importPreview = null;
+      showToast(t('settingsWorkJournal.importFailed', { error }), 'error');
+    } finally {
+      importing = false;
+    }
+  }
+
+  function formatImportBytes(bytes) {
+    const value = Number(bytes) || 0;
+    if (value < 1024) return `${value} B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${(value / 1024 / 1024).toFixed(1)} MB`;
   }
 
   function toList(value) {
@@ -87,6 +199,8 @@
     loading = true;
     loadError = '';
     try {
+      normalizeObsidianSettings();
+      normalizeAiSettings();
       const loadedRules = await invoke('get_work_journal_project_rules');
       rules = loadedRules.map(normalizeRule);
       config.work_journal_project_rules = rules;
@@ -102,9 +216,19 @@
   async function saveRules() {
     saving = true;
     try {
-      const savedRules = await invoke('save_work_journal_project_rules', { rules });
+      const [savedRules, savedObsidianSettings, savedAiSettings] = await Promise.all([
+        invoke('save_work_journal_project_rules', { rules }),
+        invoke('save_work_journal_obsidian_settings', {
+          settings: config.work_journal_obsidian,
+        }),
+        invoke('save_work_journal_ai_settings', {
+          settings: config.work_journal_ai,
+        }),
+      ]);
       rules = savedRules.map(normalizeRule);
       config.work_journal_project_rules = rules;
+      config.work_journal_obsidian = savedObsidianSettings;
+      config.work_journal_ai = savedAiSettings;
       showToast(t('settingsWorkJournal.saveSuccess'), 'success');
       dispatch('change', { autosaved: true });
     } catch (error) {
@@ -139,6 +263,178 @@
       <button type="button" class="page-action-brand" on:click={loadRules}>{t('settings.retry')}</button>
     </div>
   {/if}
+
+  <section class="settings-panel work-journal-export-settings mt-4">
+    <div class="work-journal-export-head">
+      <div>
+        <div class="settings-text font-semibold">{t('settingsWorkJournal.exportTitle')}</div>
+        <div class="settings-subtle">{t('settingsWorkJournal.exportDescription')}</div>
+      </div>
+    </div>
+    <div class="work-journal-rule-grid">
+      <label class="settings-field work-journal-span-2">
+        <span class="settings-label">{t('settingsWorkJournal.vaultPath')}</span>
+        <div class="work-journal-path-control">
+          <input
+            class="control-input"
+            value={config.work_journal_obsidian.vault_path}
+            on:input={(event) => updateObsidianSetting('vault_path', event.currentTarget.value)}
+          />
+          <button type="button" class="settings-action-secondary" on:click={chooseVault}>
+            {t('settingsWorkJournal.chooseVault')}
+          </button>
+        </div>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">{t('settingsWorkJournal.dailyFolder')}</span>
+        <input
+          class="control-input"
+          value={config.work_journal_obsidian.daily_folder}
+          on:input={(event) => updateObsidianSetting('daily_folder', event.currentTarget.value)}
+        />
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">{t('settingsWorkJournal.exportMode')}</span>
+        <select
+          class="control-input"
+          value={config.work_journal_obsidian.export_mode}
+          on:change={(event) => updateObsidianSetting('export_mode', event.currentTarget.value)}
+        >
+          <option value="preview_only">{t('settingsWorkJournal.previewOnly')}</option>
+          <option value="daily_log">{t('settingsWorkJournal.dailyLog')}</option>
+        </select>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">{t('settingsWorkJournal.conflictBehavior')}</span>
+        <select
+          class="control-input"
+          value={config.work_journal_obsidian.conflict_behavior}
+          on:change={(event) => updateObsidianSetting('conflict_behavior', event.currentTarget.value)}
+        >
+          <option value="append_under_marker">{t('settingsWorkJournal.replaceMarker')}</option>
+          <option value="create_new">{t('settingsWorkJournal.createNew')}</option>
+          <option value="manual_copy">{t('settingsWorkJournal.manualCopy')}</option>
+        </select>
+      </label>
+    </div>
+  </section>
+
+  <section class="settings-panel work-journal-import-settings mt-4">
+    <div class="work-journal-export-head">
+      <div>
+        <div class="settings-text font-semibold">{t('settingsWorkJournal.importTitle')}</div>
+        <div class="settings-subtle">{t('settingsWorkJournal.importDescription')}</div>
+      </div>
+    </div>
+    <div class="work-journal-path-control work-journal-import-path-control mt-3">
+      <input
+        class="control-input"
+        value={importSourceDir}
+        placeholder={t('settingsWorkJournal.importDefaultPath')}
+        on:input={(event) => {
+          importSourceDir = event.currentTarget.value;
+          importPreview = null;
+        }}
+      />
+      <button type="button" class="settings-action-secondary" on:click={chooseImportSource}>
+        {t('settingsWorkJournal.chooseImportSource')}
+      </button>
+      <button
+        type="button"
+        class="settings-action-secondary"
+        disabled={importPreviewing || importing}
+        on:click={previewLegacyImport}
+      >
+        {importPreviewing ? t('settingsWorkJournal.importPreviewing') : t('settingsWorkJournal.importPreview')}
+      </button>
+    </div>
+    {#if importPreview}
+      <div class="work-journal-import-summary mt-3" data-testid="work-review-import-preview">
+        <span>{t('settingsWorkJournal.importActivities', { count: importPreview.activity_count })}</span>
+        <span>{t('settingsWorkJournal.importDateRange', {
+          from: importPreview.date_from || '-',
+          to: importPreview.date_to || '-',
+        })}</span>
+        <span>{t('settingsWorkJournal.importScreenshots', {
+          count: importPreview.screenshot_count,
+          size: formatImportBytes(importPreview.screenshot_bytes),
+        })}</span>
+        {#if importPreview.skipped_screenshot_count}
+          <span>{t('settingsWorkJournal.importSkippedScreenshots', {
+            count: importPreview.skipped_screenshot_count,
+          })}</span>
+        {/if}
+        <button
+          type="button"
+          class="settings-action-primary"
+          disabled={importing}
+          on:click={importLegacyData}
+        >
+          {importing ? t('settingsWorkJournal.importing') : t('settingsWorkJournal.importConfirm')}
+        </button>
+      </div>
+    {/if}
+  </section>
+
+  <section class="settings-panel work-journal-ai-settings mt-4">
+    <div class="work-journal-export-head">
+      <div>
+        <div class="settings-text font-semibold">{t('settingsWorkJournal.aiTitle')}</div>
+        <div class="settings-subtle">{t('settingsWorkJournal.aiPrivacy')}</div>
+      </div>
+    </div>
+    <div class="work-journal-ai-toggles">
+      <label class="work-journal-toggle-row">
+        <span>
+          <strong>{t('settingsWorkJournal.aiEnabled')}</strong>
+          <small>{t('settingsWorkJournal.aiEnabledMeta')}</small>
+        </span>
+        <input
+          type="checkbox"
+          class="accent-primary-500"
+          checked={config.work_journal_ai.enabled}
+          on:change={(event) => updateAiSetting('enabled', event.currentTarget.checked)}
+        />
+      </label>
+      <label class="work-journal-toggle-row">
+        <span>
+          <strong>{t('settingsWorkJournal.visionEnabled')}</strong>
+          <small>{t('settingsWorkJournal.visionEnabledMeta')}</small>
+        </span>
+        <input
+          type="checkbox"
+          class="accent-primary-500"
+          checked={config.work_journal_ai.vision_enabled}
+          disabled={!config.work_journal_ai.enabled}
+          on:change={(event) => updateAiSetting('vision_enabled', event.currentTarget.checked)}
+        />
+      </label>
+    </div>
+    <div class="work-journal-rule-grid">
+      <label class="settings-field">
+        <span class="settings-label">{t('settingsWorkJournal.confidenceThreshold')}</span>
+        <input
+          class="control-input"
+          type="number"
+          min="1"
+          max="100"
+          value={config.work_journal_ai.confidence_threshold}
+          on:input={(event) => updateAiSetting('confidence_threshold', Number(event.currentTarget.value))}
+        />
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">{t('settingsWorkJournal.maxSessions')}</span>
+        <input
+          class="control-input"
+          type="number"
+          min="1"
+          max="20"
+          value={config.work_journal_ai.max_sessions_per_run}
+          on:input={(event) => updateAiSetting('max_sessions_per_run', Number(event.currentTarget.value))}
+        />
+      </label>
+    </div>
+  </section>
 
   {#if loading}
     <div class="settings-panel mt-4">
@@ -216,6 +512,79 @@
     gap: 12px;
   }
 
+  .work-journal-export-settings {
+    display: grid;
+    gap: 14px;
+  }
+
+  .work-journal-ai-settings {
+    display: grid;
+    gap: 14px;
+  }
+
+  .work-journal-import-settings {
+    display: grid;
+    gap: 14px;
+  }
+
+  .work-journal-import-path-control {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .work-journal-import-summary {
+    display: flex;
+    align-items: center;
+    gap: 10px 16px;
+    flex-wrap: wrap;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    letter-spacing: 0;
+  }
+
+  .work-journal-import-summary .settings-action-primary {
+    margin-left: auto;
+  }
+
+  .work-journal-ai-toggles {
+    display: grid;
+    gap: 8px;
+  }
+
+  .work-journal-toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    min-height: 44px;
+  }
+
+  .work-journal-toggle-row span {
+    display: grid;
+    gap: 2px;
+  }
+
+  .work-journal-toggle-row strong,
+  .work-journal-toggle-row small {
+    letter-spacing: 0;
+  }
+
+  .work-journal-toggle-row small {
+    color: var(--text-muted);
+  }
+
+  .work-journal-export-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .work-journal-path-control {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+
   .work-journal-rule {
     display: grid;
     gap: 14px;
@@ -245,6 +614,15 @@
 
     .work-journal-span-2 {
       grid-column: auto;
+    }
+
+    .work-journal-path-control {
+      grid-template-columns: 1fr;
+    }
+
+    .work-journal-import-summary .settings-action-primary {
+      width: 100%;
+      margin-left: 0;
     }
   }
 </style>

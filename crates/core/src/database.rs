@@ -791,6 +791,129 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
+    pub fn import_work_review_activities(
+        &self,
+        import_id: &str,
+        source_path: &str,
+        source_db_hash: &str,
+        backup_path: &str,
+        copied_screenshot_count: usize,
+        skipped_screenshot_count: usize,
+        imported_at: i64,
+        items: &[crate::work_journal::storage::LegacyActivityImportItem],
+    ) -> Result<crate::work_journal::storage::LegacyActivityImportResult> {
+        let mut conn = self.conn.lock().map_err(|e| {
+            AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
+        })?;
+        let transaction = conn.transaction()?;
+        let mut imported_count = 0usize;
+        let mut skipped_duplicate_count = 0usize;
+
+        transaction.execute(
+            "INSERT INTO work_journal_imports (
+                id, source_path, source_db_hash, backup_path, imported_count,
+                skipped_duplicate_count, copied_screenshot_count, skipped_screenshot_count,
+                completed_at, status
+             ) VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, ?6, ?7, 'running')",
+            params![
+                import_id,
+                source_path,
+                source_db_hash,
+                backup_path,
+                copied_screenshot_count as i64,
+                skipped_screenshot_count as i64,
+                imported_at,
+            ],
+        )?;
+
+        for item in items {
+            let already_imported = transaction
+                .query_row(
+                    "SELECT 1 FROM work_journal_imported_activities WHERE fingerprint = ?1",
+                    params![item.fingerprint],
+                    |_| Ok(()),
+                )
+                .is_ok();
+            if already_imported {
+                skipped_duplicate_count += 1;
+                continue;
+            }
+
+            let normalized_browser_url = item
+                .activity
+                .browser_url
+                .as_deref()
+                .map(normalize_url)
+                .filter(|url| !url.is_empty());
+            transaction.execute(
+                "INSERT INTO activities (
+                    timestamp, app_name, window_title, screenshot_path, ocr_text, category,
+                    duration, browser_url, executable_path, semantic_category,
+                    semantic_confidence, screenshot_url
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)",
+                params![
+                    item.activity.timestamp,
+                    item.activity.app_name,
+                    item.activity.window_title,
+                    item.activity.screenshot_path,
+                    item.activity.ocr_text,
+                    item.activity.category,
+                    item.activity.duration,
+                    normalized_browser_url,
+                    item.activity.executable_path,
+                    item.activity.semantic_category,
+                    item.activity.semantic_confidence,
+                ],
+            )?;
+            let destination_activity_id = transaction.last_insert_rowid();
+            transaction.execute(
+                "INSERT INTO work_journal_imported_activities (
+                    fingerprint, import_id, source_activity_id, destination_activity_id, imported_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    item.fingerprint,
+                    import_id,
+                    item.source_activity_id,
+                    destination_activity_id,
+                    imported_at,
+                ],
+            )?;
+            imported_count += 1;
+        }
+
+        transaction.execute(
+            "UPDATE work_journal_imports
+             SET imported_count = ?2,
+                 skipped_duplicate_count = ?3,
+                 status = 'success'
+             WHERE id = ?1",
+            params![
+                import_id,
+                imported_count as i64,
+                skipped_duplicate_count as i64,
+            ],
+        )?;
+        transaction.commit()?;
+
+        Ok(crate::work_journal::storage::LegacyActivityImportResult {
+            imported_count,
+            skipped_duplicate_count,
+        })
+    }
+
+    pub fn has_imported_activity_fingerprint(&self, fingerprint: &str) -> Result<bool> {
+        let conn = self.conn.lock().map_err(|e| {
+            AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
+        })?;
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM work_journal_imported_activities WHERE fingerprint = ?1",
+                params![fingerprint],
+                |_| Ok(()),
+            )
+            .is_ok())
+    }
+
     /// 获取指定应用最近24小时内的最新一条活动记录
     pub fn get_last_activity_by_app(&self, app_name: &str) -> Result<Option<Activity>> {
         let conn = self.conn.lock().map_err(|e| {
@@ -1209,8 +1332,14 @@ impl Database {
     fn invalidate_daily_cache(conn: &Connection, dates: &std::collections::HashSet<String>) {
         for date in dates {
             let _ = conn.execute("DELETE FROM daily_reports WHERE date = ?1", params![date]);
-            let _ = conn.execute("DELETE FROM daily_reports_localized WHERE date = ?1", params![date]);
-            let _ = conn.execute("DELETE FROM hourly_summaries WHERE date = ?1", params![date]);
+            let _ = conn.execute(
+                "DELETE FROM daily_reports_localized WHERE date = ?1",
+                params![date],
+            );
+            let _ = conn.execute(
+                "DELETE FROM hourly_summaries WHERE date = ?1",
+                params![date],
+            );
         }
     }
 
@@ -1292,7 +1421,9 @@ impl Database {
             "SELECT screenshot_path, timestamp FROM activities WHERE timestamp >= ?1 AND timestamp < ?2",
         )?;
         let rows: Vec<(String, i64)> = stmt
-            .query_map(params![start_ts, end_ts], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map(params![start_ts, end_ts], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
             .filter_map(|r| r.ok())
             .collect();
         let paths: Vec<String> = rows
@@ -1373,8 +1504,10 @@ impl Database {
                     .map(|(_, ts)| Self::ts_to_local_date(*ts))
                     .filter(|d| !d.is_empty())
                     .collect();
-                let deleted =
-                    conn.execute("DELETE FROM activities WHERE app_name = ?1", params![app_name])?;
+                let deleted = conn.execute(
+                    "DELETE FROM activities WHERE app_name = ?1",
+                    params![app_name],
+                )?;
                 (paths, dates, deleted)
             }
         };
@@ -2221,6 +2354,320 @@ impl Database {
             .collect();
 
         Ok(activities)
+    }
+
+    pub fn upsert_work_journal_session(
+        &self,
+        session: &crate::work_journal::storage::StoredWorkSession,
+    ) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| {
+            AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
+        })?;
+        let activity_ids = serde_json::to_string(&session.activity_ids)?;
+        conn.execute(
+            "INSERT INTO work_sessions (
+                id, date, started_at, ended_at, duration, primary_app, activity_ids, summary, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                date = excluded.date,
+                started_at = excluded.started_at,
+                ended_at = excluded.ended_at,
+                duration = excluded.duration,
+                primary_app = excluded.primary_app,
+                activity_ids = excluded.activity_ids,
+                summary = CASE
+                    WHEN work_sessions.summary IS NULL OR TRIM(work_sessions.summary) = ''
+                    THEN excluded.summary
+                    ELSE work_sessions.summary
+                END",
+            params![
+                session.id,
+                session.date,
+                session.started_at,
+                session.ended_at,
+                session.duration,
+                session.primary_app,
+                activity_ids,
+                session.summary,
+                session.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_work_journal_session(
+        &self,
+        session_id: i64,
+    ) -> Result<Option<crate::work_journal::storage::StoredWorkSession>> {
+        let conn = self.conn.lock().map_err(|e| {
+            AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
+        })?;
+        let result = conn.query_row(
+            "SELECT id, date, started_at, ended_at, duration, primary_app, activity_ids,
+                    COALESCE(summary, ''), created_at
+             FROM work_sessions WHERE id = ?1",
+            params![session_id],
+            |row| {
+                let activity_ids_json: String = row.get(6)?;
+                let activity_ids = serde_json::from_str(&activity_ids_json).unwrap_or_default();
+                Ok(crate::work_journal::storage::StoredWorkSession {
+                    id: row.get(0)?,
+                    date: row.get(1)?,
+                    started_at: row.get(2)?,
+                    ended_at: row.get(3)?,
+                    duration: row.get(4)?,
+                    primary_app: row.get(5)?,
+                    activity_ids,
+                    summary: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            },
+        );
+        match result {
+            Ok(session) => Ok(Some(session)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn update_work_journal_session_summary(
+        &self,
+        session_id: i64,
+        summary: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| {
+            AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
+        })?;
+        conn.execute(
+            "UPDATE work_sessions SET summary = ?2 WHERE id = ?1",
+            params![session_id, summary],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_generated_project_attribution(
+        &self,
+        attribution: &crate::work_journal::storage::StoredProjectAttribution,
+    ) -> Result<()> {
+        self.save_work_journal_project_attribution(attribution, "rule")
+    }
+
+    pub fn save_ai_project_attribution(
+        &self,
+        attribution: &crate::work_journal::storage::StoredProjectAttribution,
+    ) -> Result<()> {
+        let source = match attribution.source.as_str() {
+            "ai_vision" => "ai_vision",
+            _ => "ai_text",
+        };
+        self.save_work_journal_project_attribution(attribution, source)
+    }
+
+    pub fn save_ai_project_attribution_if_unreviewed(
+        &self,
+        attribution: &crate::work_journal::storage::StoredProjectAttribution,
+        summary: &str,
+    ) -> Result<bool> {
+        let mut conn = self.conn.lock().map_err(|e| {
+            AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
+        })?;
+        let transaction = conn.transaction()?;
+        let source = match attribution.source.as_str() {
+            "ai_vision" => "ai_vision",
+            _ => "ai_text",
+        };
+        let evidence = serde_json::to_string(&attribution.evidence)?;
+        let changed = transaction.execute(
+            "INSERT INTO project_attributions (
+                session_id, project_key, project_name, obsidian_page, confidence, evidence,
+                needs_review, confirmed, review_state, source, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(session_id) DO UPDATE SET
+                project_key = excluded.project_key,
+                project_name = excluded.project_name,
+                obsidian_page = excluded.obsidian_page,
+                confidence = excluded.confidence,
+                evidence = excluded.evidence,
+                needs_review = excluded.needs_review,
+                confirmed = excluded.confirmed,
+                review_state = excluded.review_state,
+                source = excluded.source,
+                created_at = excluded.created_at
+             WHERE project_attributions.confirmed = 0
+               AND project_attributions.review_state = 'included'
+               AND project_attributions.source IN ('rule', 'ai_text', 'ai_vision')",
+            params![
+                attribution.session_id,
+                attribution.project_key,
+                attribution.project_name,
+                attribution.obsidian_page,
+                attribution.confidence,
+                evidence,
+                i32::from(attribution.needs_review),
+                i32::from(attribution.confirmed),
+                attribution.review_state,
+                source,
+                attribution.created_at,
+            ],
+        )?;
+        if changed == 1 && !summary.trim().is_empty() {
+            transaction.execute(
+                "UPDATE work_sessions SET summary = ?2 WHERE id = ?1",
+                params![attribution.session_id, summary.trim()],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(changed == 1)
+    }
+
+    pub fn save_reviewed_project_attribution(
+        &self,
+        attribution: &crate::work_journal::storage::StoredProjectAttribution,
+    ) -> Result<()> {
+        self.save_work_journal_project_attribution(attribution, "manual")
+    }
+
+    fn save_work_journal_project_attribution(
+        &self,
+        attribution: &crate::work_journal::storage::StoredProjectAttribution,
+        source: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| {
+            AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
+        })?;
+        let evidence = serde_json::to_string(&attribution.evidence)?;
+        let sql = match source {
+            "rule" => {
+                "INSERT INTO project_attributions (
+                session_id, project_key, project_name, obsidian_page, confidence, evidence,
+                needs_review, confirmed, review_state, source, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(session_id) DO UPDATE SET
+                project_key = excluded.project_key,
+                project_name = excluded.project_name,
+                obsidian_page = excluded.obsidian_page,
+                confidence = excluded.confidence,
+                evidence = excluded.evidence,
+                needs_review = excluded.needs_review,
+                confirmed = excluded.confirmed,
+                review_state = excluded.review_state,
+                source = excluded.source,
+                created_at = excluded.created_at
+             WHERE project_attributions.confirmed = 0
+               AND project_attributions.source = 'rule'"
+            }
+            "ai_text" | "ai_vision" => {
+                "INSERT INTO project_attributions (
+                session_id, project_key, project_name, obsidian_page, confidence, evidence,
+                needs_review, confirmed, review_state, source, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(session_id) DO UPDATE SET
+                project_key = excluded.project_key,
+                project_name = excluded.project_name,
+                obsidian_page = excluded.obsidian_page,
+                confidence = excluded.confidence,
+                evidence = excluded.evidence,
+                needs_review = excluded.needs_review,
+                confirmed = excluded.confirmed,
+                review_state = excluded.review_state,
+                source = excluded.source,
+                created_at = excluded.created_at
+             WHERE project_attributions.confirmed = 0"
+            }
+            _ => {
+                "INSERT INTO project_attributions (
+                session_id, project_key, project_name, obsidian_page, confidence, evidence,
+                needs_review, confirmed, review_state, source, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(session_id) DO UPDATE SET
+                project_key = excluded.project_key,
+                project_name = excluded.project_name,
+                obsidian_page = excluded.obsidian_page,
+                confidence = excluded.confidence,
+                evidence = excluded.evidence,
+                needs_review = excluded.needs_review,
+                confirmed = excluded.confirmed,
+                review_state = excluded.review_state,
+                source = excluded.source,
+                created_at = excluded.created_at"
+            }
+        };
+        conn.execute(
+            sql,
+            params![
+                attribution.session_id,
+                attribution.project_key,
+                attribution.project_name,
+                attribution.obsidian_page,
+                attribution.confidence,
+                evidence,
+                i32::from(attribution.needs_review),
+                i32::from(attribution.confirmed),
+                attribution.review_state,
+                source,
+                attribution.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_work_journal_project_attribution(
+        &self,
+        session_id: i64,
+    ) -> Result<Option<crate::work_journal::storage::StoredProjectAttribution>> {
+        let conn = self.conn.lock().map_err(|e| {
+            AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
+        })?;
+        let result = conn.query_row(
+            "SELECT session_id, project_key, project_name, obsidian_page, confidence, evidence,
+                    needs_review, confirmed, review_state, source, created_at
+             FROM project_attributions WHERE session_id = ?1",
+            params![session_id],
+            |row| {
+                let evidence_json: String = row.get(5)?;
+                let evidence = serde_json::from_str(&evidence_json).unwrap_or_default();
+                Ok(crate::work_journal::storage::StoredProjectAttribution {
+                    session_id: row.get(0)?,
+                    project_key: row.get(1)?,
+                    project_name: row.get(2)?,
+                    obsidian_page: row.get(3)?,
+                    confidence: row.get(4)?,
+                    evidence,
+                    needs_review: row.get::<_, i32>(6)? != 0,
+                    confirmed: row.get::<_, i32>(7)? != 0,
+                    review_state: row.get(8)?,
+                    source: row.get(9)?,
+                    created_at: row.get(10)?,
+                })
+            },
+        );
+        match result {
+            Ok(attribution) => Ok(Some(attribution)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn record_work_journal_obsidian_export(
+        &self,
+        export: &crate::work_journal::storage::StoredObsidianExport,
+    ) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| {
+            AppError::Database(rusqlite::Error::InvalidParameterName(e.to_string()))
+        })?;
+        conn.execute(
+            "INSERT INTO obsidian_exports (
+                date, target_path, content_hash, exported_at, status
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                export.date,
+                export.target_path,
+                export.content_hash,
+                export.exported_at,
+                export.status,
+            ],
+        )?;
+        Ok(())
     }
 
     /// 保存每日报告
@@ -3281,6 +3728,9 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::{safe_local_timestamp, Activity, Database};
+    use crate::work_journal::storage::{
+        LegacyActivityImportItem, StoredProjectAttribution, StoredWorkSession,
+    };
     use rusqlite::{params, Connection};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3336,7 +3786,10 @@ mod tests {
         let conn = Connection::open(&db_path).expect("打开测试数据库失败");
         assert!(table_exists(&conn, "work_sessions"));
         assert!(table_exists(&conn, "project_attributions"));
+        assert!(table_exists(&conn, "project_attributions_dedup_backup"));
         assert!(table_exists(&conn, "obsidian_exports"));
+        assert!(table_exists(&conn, "work_journal_imports"));
+        assert!(table_exists(&conn, "work_journal_imported_activities"));
 
         let work_session_columns = table_columns(&conn, "work_sessions");
         for expected in [
@@ -3362,10 +3815,13 @@ mod tests {
             "session_id",
             "project_key",
             "project_name",
+            "obsidian_page",
             "confidence",
             "evidence",
             "needs_review",
             "confirmed",
+            "review_state",
+            "source",
             "created_at",
         ] {
             assert!(
@@ -3391,6 +3847,10 @@ mod tests {
 
         assert!(index_exists(&conn, "idx_work_sessions_date"));
         assert!(index_exists(&conn, "idx_project_attributions_session"));
+        assert!(index_exists(
+            &conn,
+            "idx_project_attributions_session_unique"
+        ));
         assert!(index_exists(&conn, "idx_obsidian_exports_date"));
 
         let _ = std::fs::remove_file(db_path);
@@ -3477,6 +3937,392 @@ mod tests {
         assert!(table_exists(&conn, "work_sessions"));
         assert!(table_exists(&conn, "project_attributions"));
         assert!(table_exists(&conn, "obsidian_exports"));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn work_journal重复归因迁移应优先人工确认并备份淘汰记录() {
+        let db_path = temp_db_path("work-journal-dedup-priority");
+        {
+            let conn = Connection::open(&db_path).expect("创建旧版测试数据库失败");
+            conn.execute_batch(
+                "CREATE TABLE project_attributions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    project_key TEXT NOT NULL,
+                    project_name TEXT NOT NULL,
+                    confidence INTEGER NOT NULL,
+                    evidence TEXT NOT NULL,
+                    needs_review INTEGER NOT NULL,
+                    confirmed INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                INSERT INTO project_attributions (
+                    session_id, project_key, project_name, confidence, evidence,
+                    needs_review, confirmed, created_at
+                ) VALUES
+                    (7, 'manual-project', '人工项目', 100, '[]', 0, 1, 100),
+                    (7, 'newer-rule', '较新规则', 80, '[]', 1, 0, 300),
+                    (8, 'older-ai', '旧 AI', 70, '[]', 1, 0, 100),
+                    (8, 'newer-ai', '新 AI', 75, '[]', 1, 0, 200);
+                CREATE TABLE project_attributions_dedup_backup (
+                    backup_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    original_id INTEGER NOT NULL UNIQUE,
+                    session_id INTEGER NOT NULL,
+                    project_key TEXT NOT NULL,
+                    project_name TEXT NOT NULL,
+                    obsidian_page TEXT NOT NULL,
+                    confidence INTEGER NOT NULL,
+                    evidence TEXT NOT NULL,
+                    needs_review INTEGER NOT NULL,
+                    confirmed INTEGER NOT NULL,
+                    review_state TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    backup_reason TEXT NOT NULL,
+                    backed_up_at INTEGER NOT NULL
+                );
+                INSERT INTO project_attributions_dedup_backup (
+                    original_id, session_id, project_key, project_name, obsidian_page,
+                    confidence, evidence, needs_review, confirmed, review_state, source,
+                    created_at, backup_reason, backed_up_at
+                ) VALUES (
+                    99, 99, 'legacy-backup', '旧备份', '', 10, '[]', 1, 0,
+                    'included', 'rule', 1, 'duplicate_session_attribution', 1
+                );",
+            )
+            .expect("创建重复归因失败");
+            conn.execute(
+                "ALTER TABLE project_attributions ADD COLUMN source TEXT NOT NULL DEFAULT 'rule'",
+                [],
+            )
+            .expect("添加来源列失败");
+            conn.execute(
+                "UPDATE project_attributions SET source = 'manual' WHERE project_key = 'manual-project'",
+                [],
+            )
+            .expect("设置人工来源失败");
+            conn.execute(
+                "UPDATE project_attributions SET source = 'ai_text' WHERE session_id = 8",
+                [],
+            )
+            .expect("设置 AI 来源失败");
+        }
+
+        let db = Database::new(&db_path).expect("迁移重复归因失败");
+        let manual = db
+            .get_work_journal_project_attribution(7)
+            .expect("读取人工归因失败")
+            .expect("人工归因应保留");
+        let ai = db
+            .get_work_journal_project_attribution(8)
+            .expect("读取 AI 归因失败")
+            .expect("AI 归因应保留");
+        drop(db);
+
+        assert_eq!(manual.project_key, "manual-project");
+        assert_eq!(manual.source, "manual");
+        assert_eq!(ai.project_key, "newer-ai");
+
+        let conn = Connection::open(&db_path).expect("重开迁移数据库失败");
+        let backup_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM project_attributions_dedup_backup",
+                [],
+                |row| row.get(0),
+            )
+            .expect("读取备份数失败");
+        assert_eq!(backup_count, 3);
+        let backup_schema: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'project_attributions_dedup_backup'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("读取备份表结构失败");
+        assert!(!backup_schema
+            .to_ascii_lowercase()
+            .contains("original_id integer not null unique"));
+        assert!(index_exists(
+            &conn,
+            "idx_project_attributions_session_unique"
+        ));
+
+        conn.execute(
+            "INSERT INTO project_attributions (
+                id, session_id, project_key, project_name, obsidian_page, confidence,
+                evidence, needs_review, confirmed, review_state, source, created_at
+             ) VALUES (2, 9, 'reused-id', '复用 ID', '', 90, '[]', 0, 0,
+                       'included', 'rule', 400)",
+            [],
+        )
+        .expect("复用已备份的历史主键失败");
+        drop(conn);
+
+        let reopened = Database::new(&db_path).expect("再次迁移重复归因失败");
+        let reused = reopened
+            .get_work_journal_project_attribution(9)
+            .expect("读取复用主键归因失败")
+            .expect("再次启动不应删除复用主键的新归因");
+        assert_eq!(reused.project_key, "reused-id");
+        drop(reopened);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn work_journal人工审阅应覆盖自动归因并在重新生成后保留() {
+        let db_path = temp_db_path("work-journal-review");
+        let db = Database::new(&db_path).expect("创建测试数据库失败");
+        let session = StoredWorkSession {
+            id: 42,
+            date: "2026-07-10".to_string(),
+            started_at: local_ts("2026-07-10", 9, 0),
+            ended_at: local_ts("2026-07-10", 10, 0),
+            duration: 3_600,
+            primary_app: "Codex".to_string(),
+            activity_ids: vec![42, 43],
+            summary: "实现 Journal 审阅".to_string(),
+            created_at: local_ts("2026-07-10", 10, 0),
+        };
+        db.upsert_work_journal_session(&session)
+            .expect("保存工作块失败");
+
+        let generated = StoredProjectAttribution {
+            session_id: 42,
+            project_key: "work-review-fork".to_string(),
+            project_name: "Work Journal".to_string(),
+            obsidian_page: "私人/个人项目文档/Work Journal/Work Journal".to_string(),
+            confidence: 70,
+            evidence: vec!["path:timereview".to_string()],
+            needs_review: true,
+            confirmed: false,
+            review_state: "included".to_string(),
+            source: "rule".to_string(),
+            created_at: local_ts("2026-07-10", 10, 0),
+        };
+        db.save_generated_project_attribution(&generated)
+            .expect("保存自动归因失败");
+
+        let reviewed = StoredProjectAttribution {
+            project_key: "it-service-robot".to_string(),
+            project_name: "IT服务机器人".to_string(),
+            confidence: 100,
+            needs_review: false,
+            confirmed: true,
+            ..generated.clone()
+        };
+        db.save_reviewed_project_attribution(&reviewed)
+            .expect("保存人工审阅失败");
+        db.save_generated_project_attribution(&generated)
+            .expect("重新生成自动归因失败");
+
+        let loaded = db
+            .get_work_journal_project_attribution(42)
+            .expect("读取归因失败")
+            .expect("归因应存在");
+        assert_eq!(loaded.project_key, "it-service-robot");
+        assert!(loaded.confirmed);
+        assert!(!loaded.needs_review);
+        assert_eq!(loaded.source, "manual");
+
+        let ai = StoredProjectAttribution {
+            project_key: "work-review-fork".to_string(),
+            project_name: "Work Journal".to_string(),
+            confidence: 86,
+            source: "ai_text".to_string(),
+            confirmed: false,
+            ..generated.clone()
+        };
+        db.save_ai_project_attribution(&ai)
+            .expect("保存 AI 归因失败");
+        db.save_generated_project_attribution(&generated)
+            .expect("规则重算不应覆盖 AI 归因");
+
+        let loaded_ai = db
+            .get_work_journal_project_attribution(42)
+            .expect("读取 AI 归因失败")
+            .expect("AI 归因应存在");
+        assert_eq!(loaded_ai.source, "manual");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn work_journal_ai异步返回不应覆盖人工归因或人工摘要() {
+        let db_path = temp_db_path("work-journal-ai-manual-race");
+        let db = Database::new(&db_path).expect("创建测试数据库失败");
+        db.upsert_work_journal_session(&StoredWorkSession {
+            id: 77,
+            date: "2026-07-10".to_string(),
+            started_at: local_ts("2026-07-10", 9, 0),
+            ended_at: local_ts("2026-07-10", 10, 0),
+            duration: 3_600,
+            primary_app: "Codex".to_string(),
+            activity_ids: vec![77],
+            summary: "规则摘要".to_string(),
+            created_at: local_ts("2026-07-10", 10, 0),
+        })
+        .expect("保存工作块失败");
+        let manual = StoredProjectAttribution {
+            session_id: 77,
+            project_key: "manual-project".to_string(),
+            project_name: "人工项目".to_string(),
+            obsidian_page: String::new(),
+            confidence: 100,
+            evidence: vec!["manual".to_string()],
+            needs_review: false,
+            confirmed: true,
+            review_state: "included".to_string(),
+            source: "manual".to_string(),
+            created_at: local_ts("2026-07-10", 10, 1),
+        };
+        db.update_work_journal_session_summary(77, "人工摘要")
+            .expect("保存人工摘要失败");
+        db.save_reviewed_project_attribution(&manual)
+            .expect("保存人工归因失败");
+
+        let ai = StoredProjectAttribution {
+            project_key: "ai-project".to_string(),
+            project_name: "AI 项目".to_string(),
+            confidence: 90,
+            confirmed: false,
+            needs_review: false,
+            source: "ai_text".to_string(),
+            created_at: local_ts("2026-07-10", 10, 2),
+            ..manual.clone()
+        };
+        let changed = db
+            .save_ai_project_attribution_if_unreviewed(&ai, "AI 摘要")
+            .expect("条件写入 AI 结果失败");
+
+        assert!(!changed);
+        let loaded = db
+            .get_work_journal_project_attribution(77)
+            .expect("读取归因失败")
+            .expect("归因应存在");
+        let session = db
+            .get_work_journal_session(77)
+            .expect("读取工作块失败")
+            .expect("工作块应存在");
+        assert_eq!(loaded.source, "manual");
+        assert_eq!(loaded.project_key, "manual-project");
+        assert_eq!(session.summary, "人工摘要");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn work_review旧活动导入应按指纹保持幂等() {
+        let db_path = temp_db_path("work-review-import-idempotent");
+        let db = Database::new(&db_path).expect("创建测试数据库失败");
+        let item = LegacyActivityImportItem {
+            source_activity_id: Some(1),
+            fingerprint: "same-activity-fingerprint".to_string(),
+            activity: Activity {
+                id: None,
+                timestamp: local_ts("2026-07-01", 9, 0),
+                app_name: "Code".to_string(),
+                window_title: "Work Journal".to_string(),
+                screenshot_path: String::new(),
+                ocr_text: Some("OCR".to_string()),
+                category: "work".to_string(),
+                duration: 60,
+                browser_url: None,
+                executable_path: None,
+                semantic_category: None,
+                semantic_confidence: None,
+                screenshot_url: None,
+            },
+        };
+
+        let first = db
+            .import_work_review_activities(
+                "import-1",
+                "/source",
+                "hash-1",
+                "/backup-1",
+                0,
+                0,
+                local_ts("2026-07-10", 10, 0),
+                std::slice::from_ref(&item),
+            )
+            .expect("首次导入失败");
+        let second = db
+            .import_work_review_activities(
+                "import-2",
+                "/source",
+                "hash-1",
+                "/backup-2",
+                0,
+                0,
+                local_ts("2026-07-10", 10, 1),
+                &[item],
+            )
+            .expect("重复导入失败");
+        let activities = db
+            .get_activities_in_range(Some("2026-07-01"), Some("2026-07-01"), 10)
+            .expect("读取导入活动失败");
+
+        assert_eq!(first.imported_count, 1);
+        assert_eq!(first.skipped_duplicate_count, 0);
+        assert_eq!(second.imported_count, 0);
+        assert_eq!(second.skipped_duplicate_count, 1);
+        assert_eq!(activities.len(), 1);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn work_journal规则重算不应覆盖未确认的_ai_归因() {
+        let db_path = temp_db_path("work-journal-ai-source");
+        let db = Database::new(&db_path).expect("创建测试数据库失败");
+        db.upsert_work_journal_session(&StoredWorkSession {
+            id: 91,
+            date: "2026-07-10".to_string(),
+            started_at: local_ts("2026-07-10", 9, 0),
+            ended_at: local_ts("2026-07-10", 10, 0),
+            duration: 3_600,
+            primary_app: "Codex".to_string(),
+            activity_ids: vec![91],
+            summary: "实现 AI 归因".to_string(),
+            created_at: local_ts("2026-07-10", 10, 0),
+        })
+        .expect("保存工作块失败");
+        let ai = StoredProjectAttribution {
+            session_id: 91,
+            project_key: "work-review-fork".to_string(),
+            project_name: "Work Journal".to_string(),
+            obsidian_page: String::new(),
+            confidence: 72,
+            evidence: vec!["app:Codex".to_string()],
+            needs_review: true,
+            confirmed: false,
+            review_state: "included".to_string(),
+            source: "ai_text".to_string(),
+            created_at: local_ts("2026-07-10", 10, 0),
+        };
+        db.save_ai_project_attribution(&ai)
+            .expect("保存 AI 归因失败");
+
+        let rule = StoredProjectAttribution {
+            project_key: "unassigned".to_string(),
+            project_name: "待确认".to_string(),
+            confidence: 0,
+            source: "rule".to_string(),
+            ..ai.clone()
+        };
+        db.save_generated_project_attribution(&rule)
+            .expect("规则重算失败");
+
+        let loaded = db
+            .get_work_journal_project_attribution(91)
+            .expect("读取归因失败")
+            .expect("归因应存在");
+        assert_eq!(loaded.source, "ai_text");
+        assert_eq!(loaded.project_key, "work-review-fork");
 
         let _ = std::fs::remove_file(db_path);
     }
@@ -4200,7 +5046,10 @@ mod tests {
 
         // 自定义分类 key 应原样保留，不应被归到 "other"（回归 #109）
         assert!(
-            stats.category_usage.iter().any(|c| c.category == "design_custom"),
+            stats
+                .category_usage
+                .iter()
+                .any(|c| c.category == "design_custom"),
             "自定义分类应出现在时间分配里，而不是被吞掉"
         );
         assert!(

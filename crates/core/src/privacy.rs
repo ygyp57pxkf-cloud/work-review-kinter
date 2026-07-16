@@ -35,6 +35,11 @@ impl PrivacyFilter {
             Regex::new(r"(?i)(password|密码|pwd|passwd)[\s:：=]+\S+").unwrap(),
             // API Key
             Regex::new(r"(?i)(api[_-]?key|secret|token)[\s:：=]+\S+").unwrap(),
+            // Authorization Bearer token
+            Regex::new(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+").unwrap(),
+            // 常见服务令牌前缀
+            Regex::new(r"(?i)\b(?:sk-|ghp_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{8,}\b")
+                .unwrap(),
         ];
 
         Self {

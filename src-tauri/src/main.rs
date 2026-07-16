@@ -44,7 +44,7 @@ use once_cell::sync::OnceCell;
 use privacy::PrivacyFilter;
 use screenshot::ScreenshotService;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -322,7 +322,11 @@ pub(crate) fn refresh_tray_menu(app: &AppHandle) {
     let _ = tray_menu.show.set_text(tray_label("show", &locale));
     let _ = tray_menu
         .recording_toggle
-        .set_text(tray_recording_toggle_label(is_recording, is_paused, &locale));
+        .set_text(tray_recording_toggle_label(
+            is_recording,
+            is_paused,
+            &locale,
+        ));
     let _ = tray_menu
         .lightweight_mode
         .set_text(tray_label("lightweight", &locale));
@@ -347,7 +351,9 @@ async fn set_app_locale(
         _ => "zh-CN",
     };
     let config = {
-        let mut s = state.lock().map_err(|e| crate::error::AppError::Unknown(e.to_string()))?;
+        let mut s = state
+            .lock()
+            .map_err(|e| crate::error::AppError::Unknown(e.to_string()))?;
         s.config.locale = normalized.to_string();
         s.config.clone()
     };
@@ -410,6 +416,24 @@ fn build_tray_icon(app: &tauri::App) -> tauri::image::Image<'static> {
 }
 
 /// 应用状态
+#[derive(Debug, Clone)]
+pub struct PendingWorkJournalExport {
+    pub date: String,
+    pub content_hash: String,
+    pub vault_path: String,
+    pub daily_folder: String,
+    pub conflict_behavior: String,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingWorkReviewImport {
+    pub source_dir: PathBuf,
+    pub source_db_path: PathBuf,
+    pub source_db_hash: String,
+    pub expires_at: i64,
+}
+
 pub struct AppState {
     pub config: AppConfig,
     pub database: Database,
@@ -427,6 +451,8 @@ pub struct AppState {
     pub telegram_bot_runtime: telegram_bot::TelegramBotRuntime,
     /// avatar 循环缓存的活动窗口（时间戳 + 窗口信息），供 screenshot 循环复用
     pub cached_active_window: Option<(std::time::Instant, monitor::ActiveWindow)>,
+    pub pending_work_journal_exports: HashMap<String, PendingWorkJournalExport>,
+    pub pending_work_review_imports: HashMap<String, PendingWorkReviewImport>,
 }
 
 #[derive(Default)]
@@ -3446,6 +3472,8 @@ async fn main() {
         localhost_api_runtime: localhost_api::LocalhostApiRuntime::default(),
         telegram_bot_runtime: telegram_bot::TelegramBotRuntime::default(),
         cached_active_window: None,
+        pending_work_journal_exports: HashMap::new(),
+        pending_work_review_imports: HashMap::new(),
     }));
     let app_lifecycle_state = Arc::new(Mutex::new(AppLifecycleState::default()));
 
@@ -3606,14 +3634,18 @@ async fn main() {
                 tray_recording_toggle_label(true, false, &tray_locale),
             )
             .build(app)?;
-            let lightweight_mode =
-                CheckMenuItemBuilder::with_id(TRAY_MENU_LIGHTWEIGHT_MODE_ID, tray_label("lightweight", &tray_locale))
-                    .checked(false)
-                    .build(app)?;
-            let avatar_toggle =
-                CheckMenuItemBuilder::with_id(TRAY_MENU_AVATAR_TOGGLE_ID, tray_label("avatar", &tray_locale))
-                    .checked(avatar_enabled)
-                    .build(app)?;
+            let lightweight_mode = CheckMenuItemBuilder::with_id(
+                TRAY_MENU_LIGHTWEIGHT_MODE_ID,
+                tray_label("lightweight", &tray_locale),
+            )
+            .checked(false)
+            .build(app)?;
+            let avatar_toggle = CheckMenuItemBuilder::with_id(
+                TRAY_MENU_AVATAR_TOGGLE_ID,
+                tray_label("avatar", &tray_locale),
+            )
+            .checked(avatar_enabled)
+            .build(app)?;
             let quit =
                 MenuItemBuilder::with_id(TRAY_MENU_QUIT_ID, tray_label("quit", &tray_locale))
                     .build(app)?;
@@ -3807,9 +3839,16 @@ async fn main() {
             commands::save_config,
             commands::get_work_journal_project_rules,
             commands::save_work_journal_project_rules,
+            commands::save_work_journal_obsidian_settings,
+            commands::save_work_journal_ai_settings,
             commands::match_work_journal_project,
             commands::get_work_journal_day,
+            commands::analyze_work_journal_with_ai,
             commands::preview_work_journal_obsidian_export,
+            commands::review_work_journal_session,
+            commands::export_work_journal_obsidian,
+            commands::preview_work_review_import,
+            commands::import_work_review_data,
             commands::get_update_settings,
             commands::save_update_settings,
             commands::should_check_updates,
@@ -3935,13 +3974,12 @@ mod tests {
         avatar_monitor_poll_interval_ms_for_platform, avatar_proactive_ai_should_run,
         avatar_transition_decision, browser_change_capture_min_interval_ms,
         data_dir_preference_path, default_data_dir, duplicate_instance_should_stay_silent,
-        effective_dock_visibility,
-        launch_args_contain_autostart, main_window_close_behavior, monitoring_poll_interval_ms,
-        monitoring_poll_interval_ms_for_platform, persist_previous_activity_backfill,
-        previous_app_backfill_duration, record_avatar_window_switch, recording_loop_decision,
-        resolve_activity_classification, reusable_cached_active_window,
-        screen_lock_check_interval_ms_for_platform, should_confirm_idle,
-        should_emit_avatar_backlog_nudge, should_hide_main_window_on_setup,
+        effective_dock_visibility, launch_args_contain_autostart, main_window_close_behavior,
+        monitoring_poll_interval_ms, monitoring_poll_interval_ms_for_platform,
+        persist_previous_activity_backfill, previous_app_backfill_duration,
+        record_avatar_window_switch, recording_loop_decision, resolve_activity_classification,
+        reusable_cached_active_window, screen_lock_check_interval_ms_for_platform,
+        should_confirm_idle, should_emit_avatar_backlog_nudge, should_hide_main_window_on_setup,
         should_persist_merge_update, should_prevent_exit,
         should_probe_browser_url_before_change_detection, should_request_screen_capture_permission,
         should_skip_system_window, tray_recording_toggle_action, tray_recording_toggle_label,
@@ -4418,8 +4456,14 @@ mod tests {
 
     #[test]
     fn 托盘录制按钮文案应与状态一致() {
-        assert_eq!(tray_recording_toggle_label(false, false, "zh-CN"), "开始录制");
-        assert_eq!(tray_recording_toggle_label(true, false, "zh-CN"), "暂停录制");
+        assert_eq!(
+            tray_recording_toggle_label(false, false, "zh-CN"),
+            "开始录制"
+        );
+        assert_eq!(
+            tray_recording_toggle_label(true, false, "zh-CN"),
+            "暂停录制"
+        );
         assert_eq!(tray_recording_toggle_label(true, true, "zh-CN"), "恢复录制");
     }
 

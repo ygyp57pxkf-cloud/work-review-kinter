@@ -657,6 +657,202 @@ pub(crate) async fn generate_text_answer_with_model(
     }
 }
 
+pub(crate) async fn generate_vision_answer_with_model(
+    model_config: &ModelConfig,
+    system_prompt: &str,
+    prompt: &str,
+    image_base64: &str,
+) -> Result<String, AppError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| AppError::Unknown(e.to_string()))?;
+
+    let response_text = match model_config.provider {
+        AiProvider::Ollama => {
+            let endpoint = model_config.endpoint.trim().trim_end_matches('/');
+            let url = if endpoint.ends_with("/api/chat") {
+                endpoint.to_string()
+            } else {
+                format!("{endpoint}/api/chat")
+            };
+            let response = client
+                .post(&url)
+                .json(&serde_json::json!({
+                    "model": model_config.model,
+                    "messages": [
+                        { "role": "system", "content": system_prompt },
+                        { "role": "user", "content": prompt, "images": [image_base64] }
+                    ],
+                    "stream": false
+                }))
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                return Err(AppError::Analysis(format!(
+                    "Ollama 视觉归因失败: {}",
+                    response.status()
+                )));
+            }
+            let result: serde_json::Value = response.json().await?;
+            result["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        }
+        AiProvider::Claude => {
+            let api_key = model_config.api_key.as_deref().unwrap_or("");
+            if api_key.is_empty() {
+                return Err(AppError::Analysis("Claude API Key 未配置".to_string()));
+            }
+            let endpoint = model_config.endpoint.trim().trim_end_matches('/');
+            let url = if endpoint.ends_with("/messages") {
+                endpoint.to_string()
+            } else {
+                format!("{endpoint}/messages")
+            };
+            let response = client
+                .post(&url)
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&serde_json::json!({
+                    "model": model_config.model,
+                    "max_tokens": 1600,
+                    "system": system_prompt,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            { "type": "text", "text": prompt },
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": image_base64
+                                }
+                            }
+                        ]
+                    }]
+                }))
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                return Err(AppError::Analysis(format!(
+                    "Claude 视觉归因失败: {}",
+                    response.status()
+                )));
+            }
+            let result: serde_json::Value = response.json().await?;
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        }
+        AiProvider::Gemini => {
+            let api_key = model_config.api_key.as_deref().unwrap_or("");
+            if api_key.is_empty() {
+                return Err(AppError::Analysis("Gemini API Key 未配置".to_string()));
+            }
+            let endpoint = model_config.endpoint.trim().trim_end_matches('/');
+            let url = format!(
+                "{endpoint}/models/{}:generateContent?key={api_key}",
+                model_config.model
+            );
+            let response = client
+                .post(&url)
+                .json(&serde_json::json!({
+                    "system_instruction": { "parts": [{ "text": system_prompt }] },
+                    "contents": [{
+                        "role": "user",
+                        "parts": [
+                            { "text": prompt },
+                            {
+                                "inline_data": {
+                                    "mime_type": "image/jpeg",
+                                    "data": image_base64
+                                }
+                            }
+                        ]
+                    }],
+                    "generationConfig": {
+                        "temperature": 0.2,
+                        "maxOutputTokens": 1600
+                    }
+                }))
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                return Err(AppError::Analysis(format!(
+                    "Gemini 视觉归因失败: {}",
+                    response.status()
+                )));
+            }
+            let result: serde_json::Value = response.json().await?;
+            result["candidates"][0]["content"]["parts"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        }
+        _ => {
+            let endpoint = model_config.endpoint.trim().trim_end_matches('/');
+            let url = if endpoint.ends_with("/chat/completions") {
+                endpoint.to_string()
+            } else {
+                format!("{endpoint}/chat/completions")
+            };
+            let mut request = client.post(&url).json(&serde_json::json!({
+                "model": model_config.model,
+                "messages": [
+                    { "role": "system", "content": system_prompt },
+                    {
+                        "role": "user",
+                        "content": [
+                            { "type": "text", "text": prompt },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": format!("data:image/jpeg;base64,{image_base64}"),
+                                    "detail": "low"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 1600,
+                "temperature": 0.2
+            }));
+            if let Some(api_key) = &model_config.api_key {
+                if !api_key.is_empty() {
+                    request = request.header("Authorization", format!("Bearer {api_key}"));
+                }
+            }
+            let response = request.send().await?;
+            if !response.status().is_success() {
+                return Err(AppError::Analysis(format!(
+                    "视觉归因失败: {}",
+                    response.status()
+                )));
+            }
+            let result: serde_json::Value = response.json().await?;
+            result["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        }
+    };
+
+    if response_text.is_empty() {
+        return Err(AppError::Analysis("视觉模型返回空内容".to_string()));
+    }
+    Ok(response_text)
+}
+
 /// 统一工作助手（Stage 6: 已接入 Agent Orchestrator）
 ///
 /// 接口签名保持不变，内部实现替换为 Agentic 架构：
@@ -775,8 +971,6 @@ pub async fn generate_text_with_model(
 ) -> Result<String, AppError> {
     generate_text_answer_with_model(&model_config, &system_prompt, &prompt).await
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -898,5 +1092,4 @@ mod tests {
             AssistantQuestionKind::ProcessRecap
         );
     }
-
 }

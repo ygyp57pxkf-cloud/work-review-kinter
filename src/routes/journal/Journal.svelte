@@ -1,6 +1,8 @@
 <script>
   import { invoke } from '@tauri-apps/api/core';
+  import { ask } from '@tauri-apps/plugin-dialog';
   import { formatDurationLocalized, formatLocalizedTime, locale, t } from '$lib/i18n/index.js';
+  import { showToast } from '../../lib/stores/toast.js';
   import LocalizedDatePicker from '../../lib/components/LocalizedDatePicker.svelte';
 
   function getLocalDateString() {
@@ -11,12 +13,22 @@
   let selectedDate = getLocalDateString();
   let journalDay = null;
   let previewMarkdown = '';
+  let previewConfirmation = null;
   let loading = true;
   let previewing = false;
   let loadError = '';
   let previewError = '';
   let lastLoadedDate = '';
   let requestId = 0;
+  let projectRules = [];
+  let draftProjectKeys = {};
+  let draftSummaries = {};
+  let reviewingSessionId = null;
+  let exporting = false;
+  let obsidianWriteEnabled = false;
+  let obsidianManualCopyEnabled = false;
+  let aiEnabled = false;
+  let aiRunning = false;
   $: currentLocale = $locale;
 
   function formatSessionTime(timestamp) {
@@ -34,10 +46,25 @@
     loadError = '';
     previewError = '';
     previewMarkdown = '';
+    previewConfirmation = null;
 
     try {
-      const day = await invoke('get_work_journal_day', { date: selectedDate });
-      if (currentRequestId === requestId) journalDay = day;
+      const [day, rules, config] = await Promise.all([
+        invoke('get_work_journal_day', { date: selectedDate }),
+        invoke('get_work_journal_project_rules'),
+        invoke('get_config'),
+      ]);
+      if (currentRequestId === requestId) {
+        journalDay = day;
+        projectRules = rules;
+        const obsidianSettings = config?.work_journal_obsidian || {};
+        obsidianManualCopyEnabled = obsidianSettings.conflict_behavior === 'manual_copy';
+        obsidianWriteEnabled = obsidianSettings.export_mode === 'daily_log'
+          && obsidianSettings.conflict_behavior !== 'manual_copy'
+          && Boolean(obsidianSettings.vault_path);
+        aiEnabled = Boolean(config?.work_journal_ai?.enabled);
+        initializeDrafts(day);
+      }
     } catch (error) {
       if (currentRequestId === requestId) {
         journalDay = null;
@@ -48,15 +75,120 @@
     }
   }
 
+  function initializeDrafts(day) {
+    draftProjectKeys = Object.fromEntries(
+      (day?.sessions || []).map((session) => [session.id, session.review_state === 'included' ? session.project_key : '']),
+    );
+    draftSummaries = Object.fromEntries(
+      (day?.sessions || []).map((session) => [session.id, session.task_summary || '']),
+    );
+  }
+
+  function updateDraftProject(sessionId, projectKey) {
+    draftProjectKeys = { ...draftProjectKeys, [sessionId]: projectKey };
+  }
+
+  function updateDraftSummary(sessionId, summary) {
+    draftSummaries = { ...draftSummaries, [sessionId]: summary };
+  }
+
+  async function reviewSession(session, reviewState) {
+    const selectedProjectKey = draftProjectKeys[session.id] || session.project_key;
+    const project = projectRules.find((rule) => rule.project_key === selectedProjectKey);
+    if (reviewState === 'included' && !project) return;
+
+    reviewingSessionId = session.id;
+    try {
+      journalDay = await invoke('review_work_journal_session', {
+        input: {
+          session_id: session.id,
+          date: selectedDate,
+          project_key: project?.project_key || session.project_key,
+          project_name: project?.project_name || session.project_name,
+          obsidian_page: project?.obsidian_page || session.obsidian_page,
+          task_summary: draftSummaries[session.id] || session.task_summary,
+          review_state: reviewState,
+        },
+      });
+      initializeDrafts(journalDay);
+      previewMarkdown = '';
+      previewConfirmation = null;
+      showToast(t('journal.reviewSuccess'), 'success');
+    } catch (error) {
+      showToast(t('journal.reviewError', { error: error?.toString?.() || String(error) }), 'error');
+    } finally {
+      reviewingSessionId = null;
+    }
+  }
+
   async function previewExport() {
     previewing = true;
     previewError = '';
     try {
-      previewMarkdown = await invoke('preview_work_journal_obsidian_export', { date: selectedDate });
+      const preview = await invoke('preview_work_journal_obsidian_export', { date: selectedDate });
+      previewMarkdown = preview.markdown;
+      previewConfirmation = {
+        date: preview.date,
+        content_hash: preview.content_hash,
+        confirmation_token: preview.confirmation_token,
+      };
     } catch (error) {
+      previewMarkdown = '';
+      previewConfirmation = null;
       previewError = t('journal.previewError', { error: error?.toString?.() || String(error) });
     } finally {
       previewing = false;
+    }
+  }
+
+  async function analyzeWithAi() {
+    if (!aiEnabled || aiRunning || !journalDay?.needs_review_count) return;
+    aiRunning = true;
+    try {
+      const result = await invoke('analyze_work_journal_with_ai', { date: selectedDate });
+      journalDay = result.day;
+      initializeDrafts(journalDay);
+      previewMarkdown = '';
+      previewConfirmation = null;
+      const message = t('journal.aiSuccess', {
+        updated: result.updated_sessions,
+        vision: result.vision_sessions,
+      });
+      showToast(message, result.errors?.length ? 'warning' : 'success');
+    } catch (error) {
+      showToast(t('journal.aiError', { error: error?.toString?.() || String(error) }), 'error');
+    } finally {
+      aiRunning = false;
+    }
+  }
+
+  async function exportToObsidian() {
+    if (!previewMarkdown || !previewConfirmation || !obsidianWriteEnabled) return;
+    const confirmed = await ask(t('journal.exportConfirmMessage'), {
+      title: t('journal.confirmExport'),
+      kind: 'warning',
+    });
+    if (!confirmed) return;
+
+    exporting = true;
+    try {
+      const result = await invoke('export_work_journal_obsidian', { input: previewConfirmation });
+      showToast(t('journal.exportSuccess', { path: result.target_path }), 'success');
+    } catch (error) {
+      showToast(t('journal.exportError', { error: error?.toString?.() || String(error) }), 'error');
+    } finally {
+      exporting = false;
+      previewConfirmation = null;
+    }
+  }
+
+  async function copyPreviewMarkdown() {
+    if (!previewMarkdown || !obsidianManualCopyEnabled) return;
+    try {
+      await navigator.clipboard.writeText(previewMarkdown);
+      showToast(t('journal.copySuccess'), 'success');
+    } catch (error) {
+      showToast(t('journal.copyError', { error: error?.toString?.() || String(error) }), 'error');
     }
   }
 
@@ -94,6 +226,19 @@
         <svg class:journal-spin={loading} class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M20 12a8 8 0 1 1-2.34-5.66M20 4v6h-6" />
         </svg>
+      </button>
+      <button
+        type="button"
+        class="page-control-btn"
+        title={aiEnabled ? t('journal.analyzeWithAi') : t('journal.aiDisabled')}
+        disabled={loading || aiRunning || !aiEnabled || !journalDay?.needs_review_count}
+        on:click={analyzeWithAi}
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="m12 3 1.4 4.1L17.5 8.5l-4.1 1.4L12 14l-1.4-4.1-4.1-1.4 4.1-1.4L12 3Z" />
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="m18 14 .8 2.2L21 17l-2.2.8L18 20l-.8-2.2L15 17l2.2-.8L18 14Z" />
+        </svg>
+        {aiRunning ? t('journal.aiRunning') : t('journal.analyzeWithAi')}
       </button>
       <button type="button" class="page-action-brand" disabled={loading || previewing || !journalDay} on:click={previewExport}>
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
@@ -196,6 +341,57 @@
                         {/each}
                       </div>
                     {/if}
+                    <div class="journal-review-controls">
+                      <label>
+                        <span>{t('journal.project')}</span>
+                        <select
+                          class="page-control-input"
+                          value={draftProjectKeys[session.id] || ''}
+                          disabled={reviewingSessionId === session.id}
+                          on:change={(event) => updateDraftProject(session.id, event.currentTarget.value)}
+                        >
+                          <option value="">{t('journal.unassigned')}</option>
+                          {#each projectRules as rule (rule.project_key)}
+                            <option value={rule.project_key}>{rule.project_name}</option>
+                          {/each}
+                        </select>
+                      </label>
+                      <label class="journal-summary-field">
+                        <span>{t('journal.taskSummary')}</span>
+                        <input
+                          class="page-control-input"
+                          value={draftSummaries[session.id] || ''}
+                          disabled={reviewingSessionId === session.id}
+                          on:input={(event) => updateDraftSummary(session.id, event.currentTarget.value)}
+                        />
+                      </label>
+                      <div class="journal-review-actions">
+                        <button
+                          type="button"
+                          class="page-control-btn journal-confirm-btn"
+                          disabled={reviewingSessionId === session.id || !draftProjectKeys[session.id]}
+                          on:click={() => reviewSession(session, 'included')}
+                        >
+                          {reviewingSessionId === session.id ? t('journal.reviewing') : t('journal.confirmSession')}
+                        </button>
+                        <button
+                          type="button"
+                          class="page-control-btn"
+                          disabled={reviewingSessionId === session.id}
+                          on:click={() => reviewSession(session, 'private')}
+                        >
+                          {t('journal.markPrivate')}
+                        </button>
+                        <button
+                          type="button"
+                          class="page-control-btn journal-exclude-btn"
+                          disabled={reviewingSessionId === session.id}
+                          on:click={() => reviewSession(session, 'excluded')}
+                        >
+                          {t('journal.excludeSession')}
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </article>
               {/each}
@@ -214,6 +410,27 @@
           <p class="journal-preview-error" role="alert">{previewError}</p>
         {/if}
         <pre class="journal-export-preview" data-testid="journal-export-preview">{previewMarkdown || t('journal.noPreview')}</pre>
+        <div class="journal-export-actions">
+          {#if obsidianManualCopyEnabled}
+            <button
+              type="button"
+              class="page-action-brand"
+              disabled={!previewMarkdown}
+              on:click={copyPreviewMarkdown}
+            >
+              {t('journal.copyPreview')}
+            </button>
+          {:else if obsidianWriteEnabled}
+            <button
+              type="button"
+              class="page-action-brand"
+              disabled={!previewMarkdown || !previewConfirmation || exporting}
+              on:click={exportToObsidian}
+            >
+              {exporting ? t('journal.exporting') : t('journal.confirmExport')}
+            </button>
+          {/if}
+        </div>
       </section>
     </div>
   {/if}
@@ -240,6 +457,13 @@
   .journal-error p,
   .journal-preview-error {
     margin: 0;
+  }
+
+  .journal-export-actions {
+    padding: 0.75rem 1rem;
+    display: flex;
+    justify-content: flex-end;
+    border-top: 1px solid rgba(148, 163, 184, 0.18);
   }
 
   .journal-loading {
@@ -470,6 +694,57 @@
     text-overflow: ellipsis;
   }
 
+  .journal-review-controls {
+    margin-top: 0.2rem;
+    padding-top: 0.75rem;
+    display: grid;
+    grid-template-columns: minmax(9rem, 0.7fr) minmax(12rem, 1.3fr);
+    gap: 0.65rem;
+    border-top: 1px dashed rgba(148, 163, 184, 0.24);
+  }
+
+  .journal-review-controls label {
+    min-width: 0;
+    display: grid;
+    gap: 0.3rem;
+  }
+
+  .journal-review-controls label > span {
+    color: #64748b;
+    font-size: 0.68rem;
+    font-weight: 600;
+  }
+
+  .journal-review-controls select,
+  .journal-review-controls input {
+    width: 100%;
+    min-width: 0;
+    font-size: 0.72rem;
+  }
+
+  .journal-review-actions {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+  }
+
+  .journal-review-actions button {
+    min-height: 2rem;
+    padding: 0.35rem 0.65rem;
+    border-radius: 6px;
+  }
+
+  .journal-confirm-btn {
+    color: #047857;
+    border-color: rgba(16, 185, 129, 0.35);
+    background: rgba(236, 253, 245, 0.82);
+  }
+
+  .journal-exclude-btn {
+    color: #b91c1c;
+  }
+
   .journal-preview-section {
     position: sticky;
     top: 1rem;
@@ -543,6 +818,12 @@
     background: rgba(146, 64, 14, 0.34);
   }
 
+  :global(.dark) .journal-confirm-btn {
+    color: #6ee7b7;
+    border-color: rgba(16, 185, 129, 0.34);
+    background: rgba(6, 78, 59, 0.28);
+  }
+
   @media (max-width: 1020px) {
     .journal-metrics {
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -593,6 +874,15 @@
 
     .journal-session-row {
       gap: 0.65rem;
+    }
+
+    .journal-review-controls {
+      grid-template-columns: 1fr;
+    }
+
+    .journal-summary-field,
+    .journal-review-actions {
+      grid-column: auto;
     }
   }
 

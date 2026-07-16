@@ -52,7 +52,9 @@ impl AiProvider {
     ///
     /// 运行时显示由前端 `providerDisplayNames`（Ask.svelte）按 locale 提供，
     /// 这里只有中文一种，已不再作为运行时显示来源。
-    #[deprecated(note = "运行时显示请用前端 providerDisplayNames；此处仅保留用于 default_profile_name 的初始命名")]
+    #[deprecated(
+        note = "运行时显示请用前端 providerDisplayNames；此处仅保留用于 default_profile_name 的初始命名"
+    )]
     pub fn display_name(&self) -> &'static str {
         match self {
             AiProvider::Ollama => "Ollama (本地)",
@@ -633,6 +635,52 @@ pub struct WorkTimeSegment {
     pub end_minute: u8,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WorkJournalObsidianConfig {
+    #[serde(default)]
+    pub vault_path: String,
+    #[serde(default = "default_work_journal_daily_folder")]
+    pub daily_folder: String,
+    #[serde(default = "default_work_journal_export_mode")]
+    pub export_mode: String,
+    #[serde(default = "default_work_journal_conflict_behavior")]
+    pub conflict_behavior: String,
+}
+
+impl Default for WorkJournalObsidianConfig {
+    fn default() -> Self {
+        Self {
+            vault_path: String::new(),
+            daily_folder: default_work_journal_daily_folder(),
+            export_mode: default_work_journal_export_mode(),
+            conflict_behavior: default_work_journal_conflict_behavior(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WorkJournalAiConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub vision_enabled: bool,
+    #[serde(default = "default_work_journal_ai_confidence_threshold")]
+    pub confidence_threshold: u16,
+    #[serde(default = "default_work_journal_ai_max_sessions")]
+    pub max_sessions_per_run: usize,
+}
+
+impl Default for WorkJournalAiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            vision_enabled: false,
+            confidence_threshold: default_work_journal_ai_confidence_threshold(),
+            max_sessions_per_run: default_work_journal_ai_max_sessions(),
+        }
+    }
+}
+
 /// 应用配置
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AppConfig {
@@ -670,6 +718,12 @@ pub struct AppConfig {
     /// Work Journal 项目归因规则
     #[serde(default = "default_work_journal_project_rules")]
     pub work_journal_project_rules: Vec<crate::work_journal::project_rules::ProjectRule>,
+    /// Work Journal Obsidian 导出配置
+    #[serde(default)]
+    pub work_journal_obsidian: WorkJournalObsidianConfig,
+    /// Work Journal AI 项目归因配置，默认关闭
+    #[serde(default)]
+    pub work_journal_ai: WorkJournalAiConfig,
     /// 用户自定义语义分类
     #[serde(default)]
     pub custom_semantic_categories: Vec<CustomSemanticCategory>,
@@ -938,6 +992,26 @@ fn default_work_journal_project_rules() -> Vec<crate::work_journal::project_rule
     crate::work_journal::project_rules::default_project_rules()
 }
 
+fn default_work_journal_daily_folder() -> String {
+    "Work Journal".to_string()
+}
+
+fn default_work_journal_export_mode() -> String {
+    "preview_only".to_string()
+}
+
+fn default_work_journal_conflict_behavior() -> String {
+    "append_under_marker".to_string()
+}
+
+fn default_work_journal_ai_confidence_threshold() -> u16 {
+    80
+}
+
+fn default_work_journal_ai_max_sessions() -> usize {
+    5
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -953,6 +1027,8 @@ impl Default for AppConfig {
             custom_categories: Vec::new(),
             website_semantic_rules: Vec::new(),
             work_journal_project_rules: default_work_journal_project_rules(),
+            work_journal_obsidian: WorkJournalObsidianConfig::default(),
+            work_journal_ai: WorkJournalAiConfig::default(),
             custom_semantic_categories: Vec::new(),
             deleted_default_categories: Vec::new(),
             deleted_default_semantic_categories: Vec::new(),
@@ -1071,6 +1147,33 @@ impl AppConfig {
         crate::work_journal::project_rules::normalize_project_rules(
             &mut self.work_journal_project_rules,
         );
+        self.work_journal_obsidian.vault_path =
+            self.work_journal_obsidian.vault_path.trim().to_string();
+        self.work_journal_obsidian.daily_folder = self
+            .work_journal_obsidian
+            .daily_folder
+            .trim()
+            .trim_matches(['/', '\\'])
+            .to_string();
+        if self.work_journal_obsidian.daily_folder.is_empty() {
+            self.work_journal_obsidian.daily_folder = default_work_journal_daily_folder();
+        }
+        if !matches!(
+            self.work_journal_obsidian.export_mode.as_str(),
+            "preview_only" | "daily_log"
+        ) {
+            self.work_journal_obsidian.export_mode = default_work_journal_export_mode();
+        }
+        if !matches!(
+            self.work_journal_obsidian.conflict_behavior.as_str(),
+            "append_under_marker" | "create_new" | "manual_copy"
+        ) {
+            self.work_journal_obsidian.conflict_behavior = default_work_journal_conflict_behavior();
+        }
+        self.work_journal_ai.confidence_threshold =
+            self.work_journal_ai.confidence_threshold.clamp(1, 100);
+        self.work_journal_ai.max_sessions_per_run =
+            self.work_journal_ai.max_sessions_per_run.clamp(1, 20);
         self.screenshot_interval = normalize_screenshot_interval(self.screenshot_interval);
         self.idle_threshold_minutes = normalize_idle_threshold_minutes(self.idle_threshold_minutes);
         self.ui_visual_style = normalize_ui_visual_style(&self.ui_visual_style);
@@ -1711,6 +1814,42 @@ mod tests {
             rule.get("obsidian_page").and_then(|value| value.as_str())
                 == Some("私人/个人项目文档/Work Journal/Work Journal")
         }));
+    }
+
+    #[test]
+    fn work_journal_obsidian默认只预览且规范化路径与模式() {
+        let mut config = AppConfig::default();
+        assert_eq!(config.work_journal_obsidian.export_mode, "preview_only");
+
+        config.work_journal_obsidian.vault_path = "  /tmp/vault  ".to_string();
+        config.work_journal_obsidian.daily_folder = " /Daily/ ".to_string();
+        config.work_journal_obsidian.export_mode = "unknown".to_string();
+        config.work_journal_obsidian.conflict_behavior = "unknown".to_string();
+        config.normalize();
+
+        assert_eq!(config.work_journal_obsidian.vault_path, "/tmp/vault");
+        assert_eq!(config.work_journal_obsidian.daily_folder, "Daily");
+        assert_eq!(config.work_journal_obsidian.export_mode, "preview_only");
+        assert_eq!(
+            config.work_journal_obsidian.conflict_behavior,
+            "append_under_marker"
+        );
+    }
+
+    #[test]
+    fn work_journal_ai默认关闭并限制批量与置信度范围() {
+        let mut config = AppConfig::default();
+        assert!(!config.work_journal_ai.enabled);
+        assert!(!config.work_journal_ai.vision_enabled);
+        assert_eq!(config.work_journal_ai.confidence_threshold, 80);
+        assert_eq!(config.work_journal_ai.max_sessions_per_run, 5);
+
+        config.work_journal_ai.confidence_threshold = 500;
+        config.work_journal_ai.max_sessions_per_run = 0;
+        config.normalize();
+
+        assert_eq!(config.work_journal_ai.confidence_threshold, 100);
+        assert_eq!(config.work_journal_ai.max_sessions_per_run, 1);
     }
 
     #[test]

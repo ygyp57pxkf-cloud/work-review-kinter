@@ -329,7 +329,18 @@ jobs:
               require_file "*/release/bundle/nsis/*.exe" "Windows 安装包"
               require_file "*/Work_Journal_portable_x64.zip" "Windows 便携版"
               PORTABLE_ZIP="$(find target -type f -path "*/Work_Journal_portable_x64.zip" 2>/dev/null | sort | head -n 1)"
-              PORTABLE_ENTRIES="$(tar -tf "$PORTABLE_ZIP" | tr -d '\r')"
+              export PORTABLE_ZIP
+              PORTABLE_ENTRIES="$(
+                powershell.exe -NoProfile -Command '
+                  Add-Type -AssemblyName System.IO.Compression.FileSystem
+                  $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $env:PORTABLE_ZIP).Path)
+                  try {
+                    $archive.Entries | ForEach-Object { $_.FullName }
+                  } finally {
+                    $archive.Dispose()
+                  }
+                ' | tr -d '\r'
+              )"
               printf '%s\n' "$PORTABLE_ENTRIES"
               for required_entry in Work_Journal.exe PORTABLE_README.txt; do
                 if ! printf '%s\n' "$PORTABLE_ENTRIES" | grep -Fxq "$required_entry"; then

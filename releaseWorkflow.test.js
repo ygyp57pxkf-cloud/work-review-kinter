@@ -48,7 +48,9 @@ test('Release workflow 应产出 Work Journal 的双架构 macOS 与 Windows 安
   assert.match(source, /release\/bundle\/nsis\/\*\.exe/);
   assert.match(source, /-name "Work_Journal\.exe"/);
   assert.match(source, /Work_Journal_portable_x64\.zip/);
-  assert.match(source, /tar -tf "\$PORTABLE_ZIP"/);
+  assert.match(source, /System\.IO\.Compression\.ZipFile/);
+  assert.match(source, /Resolve-Path \$env:PORTABLE_ZIP/);
+  assert.doesNotMatch(source, /tar -tf "\$PORTABLE_ZIP"/);
   assert.match(source, /for required_entry in Work_Journal\.exe PORTABLE_README\.txt/);
   assert.match(source, /UNEXPECTED_ENTRIES=/);
   assert.match(source, /target\/\*\*\/Work_Journal_portable_\*\.zip/);
